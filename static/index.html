@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Aurifer</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+</head>
+<body>
+<header>
+  <h1>AURIFER</h1>
+  <div class="status" id="status">Connecting…</div>
+  <div class="controls">
+    <button id="btn-pause">Pause</button>
+    <button id="btn-step">Step</button>
+    <button id="btn-reset">Reset</button>
+    <label>Speed <input type="range" id="speed" min="1" max="2000" value="30"><span id="speed-val">30</span>/s</label>
+  </div>
+</header>
+<div class="warnings" id="warnings"></div>
+<main>
+  <section class="panel"><h2>Price</h2>
+    <div class="big-price" id="price">—</div>
+    <div class="small" id="ohlc">O — H — L —</div>
+    <div class="small" id="aar">ATR — · ADX — · RSI —</div>
+    <div class="small" id="progress">0 / 0</div>
+  </section>
+  <section class="panel"><h2>Position</h2>
+    <div id="position-content" class="flat">FLAT</div>
+  </section>
+  <section class="panel"><h2>Indicators</h2>
+    <div class="gauge-row"><span>RSI</span><div class="gauge"><div class="gauge-fill" id="rsi-fill"></div></div><span id="rsi-val">—</span></div>
+    <div class="gauge-row"><span>ADX</span><div class="gauge"><div class="gauge-fill" id="adx-fill"></div></div><span id="adx-val">—</span></div>
+    <div class="gauge-row"><span>P(up)</span><div class="gauge"><div class="gauge-fill" id="pred-fill"></div></div><span id="pred-val">—</span></div>
+    <div class="small" id="trend-row">Trend: —</div>
+  </section>
+  <section class="panel wide"><h2>Equity</h2>
+    <div class="equity-wrap"><canvas id="equity-chart"></canvas></div>
+  </section>
+  <section class="panel"><h2>Stats</h2>
+    <div class="stats-grid">
+      <div><span>Equity</span><b id="stat-equity">—</b></div>
+      <div><span>PnL</span><b id="stat-pnl">—</b></div>
+      <div><span>Trades</span><b id="stat-trades">—</b></div>
+      <div><span>Win rate</span><b id="stat-winrate">—</b></div>
+      <div><span>Missed</span><b id="stat-missed">—</b></div>
+    </div>
+  </section>
+  <section class="panel wide"><h2>Recent Trades</h2>
+    <table id="trades-table">
+      <thead><tr><th>Time</th><th>Side</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

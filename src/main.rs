@@ -32,14 +32,19 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Cli::parse();
-    let start = parse_date(&args.start)?;
-    let end = parse_date(&args.end)?;
+    let (start, end) = resolve_date_range(&args.start, &args.end)?;
+    println!("📅 date range: {} → {} (resolution: {})",
+             start.format("%Y-%m-%d"), end.format("%Y-%m-%d"), args.resolution);
 
     let ig: Option<IgBroker> = if args.no_ig {
         None
     } else {
         match IgBroker::connect().await {
-            Ok(b) => { println!("✅ IG connected — epic {}", b.epic()); Some(b) }
+            Ok(mut b) => {
+                b.set_no_cache(args.no_cache);
+                println!("✅ IG connected — epic {}", b.epic());
+                Some(b)
+            }
             Err(e) => {
                 eprintln!("⚠️ IG connection failed: {e}");
                 eprintln!("⚠️ Falling back to synthetic data. Set IG_* in .env to use IG.");
@@ -50,23 +55,33 @@ async fn main() -> Result<()> {
 
     let bars: Vec<Bar> = match &ig {
         Some(b) => {
-            println!("Fetching gold bars from IG ({} → {}) …",
-                     start.format("%Y-%m-%d"), end.format("%Y-%m-%d"));
-            let n = ((end - start).num_minutes()).clamp(100, 1000) as usize;
-            data::fetch_ig_bars(b, "MINUTE", n).await?
+            println!("Fetching gold bars from IG ({} → {}, resolution={}) …",
+                     start.format("%Y-%m-%d"), end.format("%Y-%m-%d"), args.resolution);
+            data::fetch_ig_bars(b, &args.resolution, start, end).await?
         }
         None => data::fetch_synthetic_bars(start, end).await?,
     };
-    println!("Loaded {} 1-min bars", bars.len());
-    if bars.is_empty() { anyhow::bail!("no bars returned"); }
+    println!("Loaded {} {} bars", bars.len(), args.resolution);
+    if bars.is_empty() {
+        anyhow::bail!(
+            "no bars returned.\n\
+             Try running with no --start/--end to use the default 90-day lookback.");
+    }
 
     let mut cfg = Config::default();
+    apply_resolution_defaults(&mut cfg, &args.resolution);
     cfg.spread = 0.30;
     cfg.commission_per_unit = 0.0;
     cfg.data_source_is_mid_price = ig.is_none();
+
     let mut warnings = Vec::new();
     if cfg.data_source_is_mid_price {
         warnings.push("synthetic data — all results meaningless".into());
+    }
+    if args.resolution.to_uppercase() != "MINUTE" {
+        warnings.push(format!(
+            "resolution={} — live loop runs on MINUTE bars. backtest validates the strategy idea, \
+             not the live execution.", args.resolution));
     }
     if !args.no_news {
         if let Ok(key) = std::env::var("QUANTGIST_API_KEY") {
@@ -120,12 +135,61 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Resolve `--start` / `--end`. Empty values default to a sensible range:
+/// `end` = now (UTC), `start` = 90 days before `end`.
+fn resolve_date_range(start_str: &str, end_str: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    let end = if end_str.is_empty() {
+        Utc::now()
+    } else {
+        parse_date(end_str)?
+    };
+    let start = if start_str.is_empty() {
+        end - chrono::Duration::days(90)
+    } else {
+        parse_date(start_str)?
+    };
+    anyhow::ensure!(start < end, "start date must be before end date");
+    anyhow::ensure!(
+        end <= Utc::now() + chrono::Duration::days(1),
+        "end date {} is in the future", end.format("%Y-%m-%d"));
+    Ok((start, end))
+}
+
+/// Resolution-aware Config adjustments. HOUR bars span 3,600 s each, so
+/// the 30-minute default time stop would force every trade to close on
+/// the very next bar.
+fn apply_resolution_defaults(cfg: &mut Config, resolution: &str) {
+    match resolution.to_uppercase().as_str() {
+        "MINUTE" | "MINUTE_2" | "MINUTE_3" | "MINUTE_5" => {
+            cfg.max_seconds_in_trade = 1800;
+            cfg.max_bars_in_trade    = 30;
+        }
+        "MINUTE_10" | "MINUTE_15" | "MINUTE_30" => {
+            cfg.max_seconds_in_trade = 4 * 3600;
+            cfg.max_bars_in_trade    = 16;
+        }
+        "HOUR" | "HOUR_2" | "HOUR_3" | "HOUR_4" => {
+            cfg.max_seconds_in_trade = 24 * 3600;
+            cfg.max_bars_in_trade    = 24;
+        }
+        "DAY" | "WEEK" => {
+            cfg.max_seconds_in_trade = 7 * 24 * 3600;
+            cfg.max_bars_in_trade    = 7;
+        }
+        _ => {}
+    }
+}
+
 async fn run_live_trading(broker: IgBroker, cfg: Config, trained: Option<CalibratedPredictor>) -> Result<()> {
     let demo = std::env::var("IG_BASE_URL").map(|u| u.contains("demo")).unwrap_or(true);
     println!("▶ IG live loop ({}) — epic {}",
              if demo { "DEMO" } else { "🔴 LIVE MONEY" }, broker.epic());
+    println!("⚠️ Live loop builds 1-minute bars from 2s snapshots.");
+    println!("⚠️ If you backtested on HOUR, the live strategy differs — see docs/LIVE_TRADING.md.");
 
-    let warm = data::fetch_ig_bars(&broker, "MINUTE", 200).await?;
+    let warm_end = Utc::now();
+    let warm_start = warm_end - chrono::Duration::minutes(200);
+    let warm = data::fetch_ig_bars(&broker, "MINUTE", warm_start, warm_end).await?;
     let mut state = make_session(cfg.clone(), trained);
     for b in &warm { state.step(b); }
     println!("Primed with {} bars", warm.len());
@@ -203,7 +267,7 @@ fn default_eval() -> strategies::Eval {
 
 fn parse_date(s: &str) -> Result<DateTime<Utc>> {
     let n = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .with_context(|| format!("bad date: {s}"))?;
+        .with_context(|| format!("bad date: {s} (expected YYYY-MM-DD)"))?;
     Ok(Utc.from_utc_datetime(&n.and_hms_opt(0, 0, 0).unwrap()))
 }
 

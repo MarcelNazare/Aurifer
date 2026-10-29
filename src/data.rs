@@ -3,13 +3,17 @@ use crate::types::Bar;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-pub async fn fetch_ig_bars(broker: &IgBroker, resolution: &str, count: usize) -> Result<Vec<Bar>> {
-    broker.fetch_bars(resolution, count).await
+pub async fn fetch_ig_bars(
+    broker: &IgBroker,
+    resolution: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<Bar>> {
+    broker.fetch_bars(resolution, start, end).await
 }
 
 pub async fn fetch_synthetic_bars(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<Bar>> {
     eprintln!("⚠️  No IG broker configured — using SYNTHETIC bars.");
-    eprintln!("⚠️  Backtest results are meaningless. Set IG_* in .env to use real data.");
     Ok(synthetic(start, end))
 }
 

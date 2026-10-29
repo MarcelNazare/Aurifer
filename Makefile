@@ -61,11 +61,12 @@ run: build
 
 web: build
 	@echo "$(CYAN)→$(RESET) launching web dashboard"
-	./$(TARGET) web --start $(START) --end $(END)
+	./$(TARGET) web 
 
 backtest: build
-	@echo "$(CYAN)→$(RESET) running backtest ($(START) → $(END))"
-	./$(TARGET) backtest --start $(START) --end $(END)
+	@echo "$(CYAN)→$(RESET) running backtest"
+	./$(TARGET) backtest
+
 
 diagnostics: build
 	@echo "$(CYAN)→$(RESET) point-prediction diagnostic ($(START) → $(END))"

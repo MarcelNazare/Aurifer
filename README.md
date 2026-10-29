@@ -7,6 +7,8 @@
 
 Aurifer is a Rust research system for backtesting short-term gold strategies against real market data. It runs five strategy families, trains a calibrated ML predictor, walk-forward validates the predictor against regime shifts, and reports statistical significance on every backtest. When the math doesn't hold, it says so — and refuses to trade.
 
+![Aurifer Dashboard Preview](docs/images/aurifer-dashboard.png)
+
 It talks to **IG Markets** for both historical data and live execution (via the `ig-client` crate). It is not a money machine. It is the tool you build *before* you have a strategy, so you can find out — with real data and realistic costs — whether the strategy is worth risking money on.
 
 ---

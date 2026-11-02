@@ -10,13 +10,13 @@ mod broker;
 mod cli;
 mod costs;
 mod data;
+mod gui;
 mod indicators;
 mod point_predictor;
 mod predictor;
 mod session;
 mod stats;
 mod strategies;
-mod tui;
 mod types;
 mod web;
 
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    match args.command.as_ref().unwrap_or(&Command::Tui) {
+    match args.command.as_ref().unwrap_or(&Command::Gui) {
         Command::Forecast => {
             run_forecast(ig.as_ref(), &args, start, end).await?;
         }
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
             if let Some(l) = bars.last() { s.force_close(l); }
             print_report(&s);
         }
-        Command::Tui => {
+        Command::Gui => {
             let bars = load_bars(ig.as_ref(), &start, &end, &args).await?;
             let cfg = base_config(ig.is_none(), &args);
             let warnings = build_warnings(&cfg, &args);
@@ -85,8 +85,7 @@ async fn main() -> Result<()> {
             let forecast = training.as_ref().map(|t| {
                 compute_forecast_summary(&bars, &cfg, &args, &t.model, t.validated)
             });
-            let mut app = tui::App::new(bars, cfg, warnings, trained, forecast);
-            app.run().context("TUI error")?;
+            gui::run_gui(bars, cfg, warnings, trained, forecast)?;
         }
         Command::Web => {
             let bars = load_bars(ig.as_ref(), &start, &end, &args).await?;
@@ -126,10 +125,6 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// TRAINING
-// ═══════════════════════════════════════════════════════════════════
 
 fn train_model(bars: &[Bar], cfg: &Config, args: &Cli) -> Result<Option<TrainingResult>> {
     if args.no_predictor {
@@ -246,10 +241,6 @@ fn compute_forecast_summary(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// FORECAST CLI
-// ═══════════════════════════════════════════════════════════════════
-
 async fn run_forecast(
     ig: Option<&IgBroker>,
     args: &Cli,
@@ -329,10 +320,6 @@ async fn run_forecast(
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// LOAD BARS
-// ═══════════════════════════════════════════════════════════════════
-
 async fn load_bars(
     ig: Option<&IgBroker>,
     start: &DateTime<Utc>,
@@ -373,10 +360,6 @@ async fn load_bars(
         }
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// SHARED HELPERS
-// ═══════════════════════════════════════════════════════════════════
 
 fn base_config(mid_price: bool, args: &Cli) -> Config {
     let mut cfg = Config::default();
@@ -599,28 +582,16 @@ async fn run_live_trading(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// NEWS BLACKOUTS — FXMacroData (recent) + Fed website (FOMC)
-// ═══════════════════════════════════════════════════════════════════
-
 const FXMD_BASE: &str = "https://api.fxmacrodata.com/v1";
 const FED_FOMC_CALENDAR: &str =
     "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm";
 
-/// Combine two sources of news blackout windows:
-///
-///   1. FXMacroData `/calendar/usd` — recent and upcoming USD macro
-///      releases. Keyless for USD.
-///   2. Federal Reserve FOMC calendar — scraped automatically. Covers
-///      2021–2027 with no maintenance. For backtests before 2021, a
-///      hardcoded fallback fills the gap.
 async fn fetch_news_blackouts(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<Vec<(i64, i64)>> {
     let mut windows: Vec<(i64, i64)> = Vec::new();
 
-    // ── 1. FOMC dates (scraped from Fed website) ───────────────
     let fomc = fomc_dates().await;
     let mut fomc_added = 0;
     for ts in &fomc {
@@ -633,7 +604,6 @@ async fn fetch_news_blackouts(
         println!("  FOMC: {} meetings in range", fomc_added);
     }
 
-    // ── 2. FXMacroData for recent/future events ────────────────
     let today = Utc::now();
     let window_lo = today - chrono::Duration::days(85);
     let window_hi = today + chrono::Duration::days(30);
@@ -665,14 +635,6 @@ async fn fetch_news_blackouts(
     Ok(windows)
 }
 
-// ── FOMC dates — automatic ──────────────────────────────────────
-
-/// Fetch FOMC meeting dates from the Federal Reserve's official
-/// calendar page. Falls back to a hardcoded schedule if the fetch
-/// fails or the page layout changes.
-///
-/// The regex anchors on the minutes PDF filename
-/// (`fomcminutesYYYYMMDD.pdf`), which is stable and unambiguous.
 async fn fomc_dates() -> Vec<i64> {
     match scrape_fomc_dates().await {
         Ok(dates) if !dates.is_empty() => {
@@ -698,8 +660,6 @@ async fn scrape_fomc_dates() -> Result<Vec<i64>> {
 
     let html = client.get(FED_FOMC_CALENDAR).send().await?.text().await?;
 
-    // Match "January 27-28 Minutes: [PDF](.../fomcminutes20260128.pdf)"
-    // Also handles "*" after the range (e.g. "March 17-18*").
     let re = Regex::new(
         r#"(?x)
         (?P<month>[A-Z][a-z]+)\s+
@@ -718,8 +678,6 @@ async fn scrape_fomc_dates() -> Result<Vec<i64>> {
         if year == 0 || month == 0 || day == 0 { continue; }
 
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
-            // 14:00 ET = 18:00 or 19:00 UTC depending on DST. 18:00
-            // is a safe approximation; the ±15 min window covers both.
             if let Some(dt) = date.and_hms_opt(18, 0, 0) {
                 out.push(dt.and_utc().timestamp());
             }
@@ -731,29 +689,20 @@ async fn scrape_fomc_dates() -> Result<Vec<i64>> {
     Ok(out)
 }
 
-/// Hardcoded fallback for backtests that predate the Fed calendar
-/// page's coverage (pre-2021). Only used if the scrape fails.
 fn fallback_fomc_dates() -> Vec<i64> {
     let dates: &[(i32, u32, u32)] = &[
-        // 2014
         (2014, 1, 29), (2014, 3, 19), (2014, 4, 30), (2014, 6, 18),
         (2014, 7, 30), (2014, 9, 17), (2014, 10, 29), (2014, 12, 17),
-        // 2015
         (2015, 1, 28), (2015, 3, 18), (2015, 4, 29), (2015, 6, 17),
         (2015, 7, 29), (2015, 9, 17), (2015, 10, 28), (2015, 12, 16),
-        // 2016
         (2016, 1, 27), (2016, 3, 16), (2016, 4, 27), (2016, 6, 15),
         (2016, 7, 27), (2016, 9, 21), (2016, 11, 2), (2016, 12, 14),
-        // 2017
         (2017, 2, 1), (2017, 3, 15), (2017, 5, 3), (2017, 6, 14),
         (2017, 7, 26), (2017, 9, 20), (2017, 11, 1), (2017, 12, 13),
-        // 2018
         (2018, 1, 31), (2018, 3, 21), (2018, 5, 2), (2018, 6, 13),
         (2018, 8, 1), (2018, 9, 26), (2018, 11, 8), (2018, 12, 19),
-        // 2019
         (2019, 1, 30), (2019, 3, 20), (2019, 5, 1), (2019, 6, 19),
         (2019, 7, 31), (2019, 9, 18), (2019, 10, 30), (2019, 12, 11),
-        // 2020
         (2020, 1, 29), (2020, 3, 3), (2020, 3, 15), (2020, 4, 29),
         (2020, 6, 10), (2020, 7, 29), (2020, 9, 16), (2020, 11, 5),
         (2020, 12, 16),
@@ -765,8 +714,6 @@ fn fallback_fomc_dates() -> Vec<i64> {
             .map(|dt| dt.and_utc().timestamp())
     }).collect()
 }
-
-// ── FXMacroData ─────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct FxmdCalendarResponse {

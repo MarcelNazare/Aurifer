@@ -17,7 +17,7 @@ RED     := \033[31m
 RESET   := \033[0m
 
 .DEFAULT_GOAL := help
-.PHONY: help build run web backtest diagnostics live check test fmt clippy docs clean rebuild
+.PHONY: help build run gui web backtest forecast diagnostics live check test fmt clippy docs clean rebuild
 
 # ── Help ─────────────────────────────────────────────────────────────
 
@@ -27,11 +27,13 @@ help:
 	@echo "Usage: $(GREEN)make <target>$(RESET)"
 	@echo ""
 	@echo "  $(CYAN)build$(RESET)        Compile release binary → $(TARGET)"
-	@echo "  $(CYAN)run$(RESET)          Interactive TUI (default command)"
+	@echo "  $(CYAN)run$(RESET)          Interactive GUI (default command)"
+	@echo "  $(CYAN)gui$(RESET)          Same as run — explicit GUI launch"
 	@echo "  $(CYAN)web$(RESET)          Browser dashboard at http://localhost:<port>"
 	@echo "  $(CYAN)backtest$(RESET)     Headless backtest with statistical report"
+	@echo "  $(CYAN)forecast$(RESET)     Print direction forecast to terminal"
 	@echo "  $(CYAN)diagnostics$(RESET)  Point-prediction diagnostic (proves it's untradeable)"
-	@echo "  $(CYAN)live$(RESET)         OANDA demo live trading (requires --confirm-live)"
+	@echo "  $(CYAN)live$(RESET)         IG demo live trading (requires --confirm-live)"
 	@echo ""
 	@echo "  $(CYAN)check$(RESET)        Fast type-check without full build"
 	@echo "  $(CYAN)test$(RESET)         Run test suite"
@@ -55,25 +57,28 @@ rebuild: clean build
 
 # ── Run ──────────────────────────────────────────────────────────────
 
-run: build
-	@echo "$(CYAN)→$(RESET) launching TUI"
-	./$(TARGET) --start $(START) --end $(END)
+run gui: build
+	@echo "$(CYAN)→$(RESET) launching GUI ($(START) → $(END))"
+	./$(TARGET) gui --start $(START) --end $(END)
 
 web: build
-	@echo "$(CYAN)→$(RESET) launching web dashboard"
-	./$(TARGET) web 
+	@echo "$(CYAN)→$(RESET) launching web dashboard ($(START) → $(END))"
+	./$(TARGET) web --start $(START) --end $(END)
 
 backtest: build
-	@echo "$(CYAN)→$(RESET) running backtest"
-	./$(TARGET) backtest
+	@echo "$(CYAN)→$(RESET) running backtest ($(START) → $(END))"
+	./$(TARGET) backtest --start $(START) --end $(END)
 
+forecast: build
+	@echo "$(CYAN)→$(RESET) running forecast ($(START) → $(END))"
+	./$(TARGET) forecast --start $(START) --end $(END)
 
 diagnostics: build
 	@echo "$(CYAN)→$(RESET) point-prediction diagnostic ($(START) → $(END))"
 	./$(TARGET) diagnostics point-prediction --start $(START) --end $(END)
 
 live: build
-	@echo "$(YELLOW)⚠  OANDA demo mode. Real money requires OANDA_LIVE=1$(RESET)"
+	@echo "$(YELLOW)⚠  IG demo mode. Real money requires IG_BASE_URL without 'demo'.$(RESET)"
 	@echo "$(YELLOW)⚠  Read docs/LIVE_TRADING.md first.$(RESET)"
 	./$(TARGET) live --confirm-live --start $(START) --end $(END)
 

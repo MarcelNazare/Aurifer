@@ -19,24 +19,40 @@ use crate::session::SessionState;
 use crate::types::*;
 
 pub struct App {
-    bars: Vec<Bar>, cfg: Config, state: SessionState,
-    current_idx: usize, paused: bool, speed: f64, should_quit: bool,
-    warnings: Vec<String>, equity_history: Vec<f64>,
-    last_frame: Instant, accumulated: f64,
+    bars: Vec<Bar>,
+    cfg: Config,
+    state: SessionState,
+    current_idx: usize,
+    paused: bool,
+    speed: f64,
+    should_quit: bool,
+    warnings: Vec<String>,
+    equity_history: Vec<f64>,
+    last_frame: Instant,
+    accumulated: f64,
+    forecast: Option<ForecastSummary>,
 }
 
 impl App {
-    pub fn new(bars: Vec<Bar>, cfg: Config, warnings: Vec<String>,
-               predictor: Option<crate::predictor::CalibratedPredictor>) -> Self {
+    pub fn new(
+        bars: Vec<Bar>,
+        cfg: Config,
+        warnings: Vec<String>,
+        predictor: Option<crate::predictor::CalibratedPredictor>,
+        forecast: Option<ForecastSummary>,
+    ) -> Self {
         let state = match predictor {
             Some(p) => SessionState::with_predictor(cfg.clone(), p),
-            None    => SessionState::new(cfg.clone()),
+            None => SessionState::new(cfg.clone()),
         };
         let eq = state.equity;
-        Self { bars, cfg, state, current_idx: 0, paused: false, speed: 30.0,
-               should_quit: false, warnings, equity_history: vec![eq],
-               last_frame: Instant::now(), accumulated: 0.0 }
+        Self {
+            bars, cfg, state, current_idx: 0, paused: false, speed: 30.0,
+            should_quit: false, warnings, equity_history: vec![eq],
+            last_frame: Instant::now(), accumulated: 0.0, forecast,
+        }
     }
+
     pub fn run(&mut self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -49,12 +65,15 @@ impl App {
         term.show_cursor()?;
         res
     }
+
     fn reset(&mut self) {
         self.state = SessionState::new(self.cfg.clone());
         self.current_idx = 0;
         self.equity_history = vec![self.state.equity];
-        self.accumulated = 0.0; self.paused = false;
+        self.accumulated = 0.0;
+        self.paused = false;
     }
+
     fn advance(&mut self, n: usize) {
         for _ in 0..n {
             if self.current_idx >= self.bars.len() { return; }
@@ -70,6 +89,7 @@ impl App {
             }
         }
     }
+
     fn loop_(&mut self, term: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         loop {
             term.draw(|f| self.draw(f))?;
@@ -100,25 +120,38 @@ impl App {
         }
         Ok(())
     }
+
     fn draw(&self, f: &mut Frame) {
         let area = f.area();
         let chunks = Layout::vertical([
-            Constraint::Length(3), Constraint::Length(9), Constraint::Length(9),
-            Constraint::Length(6), Constraint::Min(5), Constraint::Length(1),
+            Constraint::Length(3),  // header
+            Constraint::Length(5),  // forecast
+            Constraint::Length(9),  // price + position
+            Constraint::Length(9),  // indicators
+            Constraint::Length(6),  // equity
+            Constraint::Min(5),     // trades
+            Constraint::Length(1),  // footer
         ]).split(area);
         self.draw_header(f, chunks[0]);
-        self.draw_mid(f, chunks[1], chunks[2]);
-        self.draw_equity(f, chunks[3]);
-        self.draw_trades(f, chunks[4]);
-        self.draw_footer(f, chunks[5]);
+        self.draw_forecast(f, chunks[1]);
+        self.draw_mid(f, chunks[2], chunks[3]);
+        self.draw_equity(f, chunks[4]);
+        self.draw_trades(f, chunks[5]);
+        self.draw_footer(f, chunks[6]);
     }
+
     fn draw_header(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let bar = self.state.last_bar;
         let ts = bar.as_ref().map(|b| {
             chrono::DateTime::<chrono::Utc>::from_timestamp(b.ts, 0)
-                .map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default()
         }).unwrap_or_else(|| "—".into());
-        let prog = if self.bars.is_empty() { 0.0 } else { self.current_idx as f64 / self.bars.len() as f64 };
+        let prog = if self.bars.is_empty() {
+            0.0
+        } else {
+            self.current_idx as f64 / self.bars.len() as f64
+        };
         let status = if self.current_idx >= self.bars.len() {
             Span::styled("COMPLETE", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         } else if self.paused {
@@ -128,36 +161,139 @@ impl App {
         };
         let line = Line::from(vec![
             Span::styled("AURIFER ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            status, Span::raw(format!("  {ts}  ")),
+            status,
+            Span::raw(format!("  {ts}  ")),
             Span::raw(format!("{}/{} ({:.1}%)  ", self.current_idx, self.bars.len(), prog * 100.0)),
             Span::raw(format!("speed {:.0}/s", self.speed)),
         ]);
         let mut lines = vec![line];
-        for w in &self.warnings { lines.push(Line::from(Span::styled(format!("⚠ {w}"), Style::default().fg(Color::Red)))); }
-        f.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::ALL)), area);
+        for w in &self.warnings {
+            lines.push(Line::from(Span::styled(format!("⚠ {w}"), Style::default().fg(Color::Red))));
+        }
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+            area,
+        );
     }
-    fn draw_mid(&self, f: &mut Frame, price_a: ratatui::layout::Rect, ind_a: ratatui::layout::Rect) {
+
+    fn draw_forecast(&self, f: &mut Frame, area: ratatui::layout::Rect) {
+        let (title, lines) = match &self.forecast {
+            None => (
+                "FORECAST — not available".to_string(),
+                vec![Line::from(Span::styled(
+                    "no predictor (disabled or not enough bars)",
+                    Style::default().fg(Color::DarkGray),
+                ))],
+            ),
+            Some(fc) => {
+                let title = format!(
+                    "FORECAST — next {} {} bars · as of {} @ ${:.2}",
+                    fc.horizon, fc.resolution, fc.last_date, fc.last_close
+                );
+
+                let dir_color = match fc.direction.as_str() {
+                    "LIKELY UP"   => Color::Green,
+                    "LIKELY DOWN" => Color::Red,
+                    _             => Color::Yellow,
+                };
+                let val_color = if fc.validated { Color::Green } else { Color::Yellow };
+
+                let line1 = Line::from(vec![
+                    Span::styled("P(up) ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("{:.1}%", fc.p_up * 100.0),
+                        Style::default().fg(dir_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  →  "),
+                    Span::styled(&fc.direction,
+                                 Style::default().fg(dir_color).add_modifier(Modifier::BOLD)),
+                    Span::raw(format!(
+                        "  ({} confidence, edge {:.1}%)",
+                        fc.confidence, fc.edge_pct
+                    )),
+                ]);
+
+                let line2 = Line::from(vec![
+                    Span::raw("AUC: "),
+                    Span::styled(
+                        format!("{:.3}", fc.auc),
+                        Style::default().fg(if fc.auc >= 0.54 { Color::Green } else { Color::Yellow }),
+                    ),
+                    Span::raw(format!(" [{:.3}–{:.3}]   ", fc.auc_ci_lo, fc.auc_ci_hi)),
+                    Span::raw("Brier: "),
+                    Span::styled(
+                        format!("{:.4}", fc.brier),
+                        Style::default().fg(if fc.brier < 0.24 { Color::Green } else { Color::Red }),
+                    ),
+                    Span::raw(format!("   base rate: {:.1}%", fc.base_rate * 100.0)),
+                ]);
+
+                let line3 = Line::from(vec![
+                    Span::raw("Walk-forward: "),
+                    Span::styled(
+                        if fc.validated { "✅ VALIDATED" } else { "⚠️  UNVALIDATED" },
+                        Style::default().fg(val_color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  ·  top: "),
+                    Span::styled(fc.features_line(), Style::default().fg(Color::DarkGray)),
+                ]);
+
+                (title, vec![line1, line2, line3])
+            }
+        };
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL).title(title)),
+            area,
+        );
+    }
+
+    fn draw_mid(
+        &self,
+        f: &mut Frame,
+        price_a: ratatui::layout::Rect,
+        ind_a: ratatui::layout::Rect,
+    ) {
         let h = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(ratatui::layout::Rect { x: price_a.x, y: price_a.y, width: price_a.width, height: price_a.height });
+            .split(ratatui::layout::Rect {
+                x: price_a.x, y: price_a.y, width: price_a.width, height: price_a.height,
+            });
+
         let bar = self.state.last_bar;
         let mut pl = Vec::new();
         if let Some(b) = bar {
             pl.push(Line::from(vec![
                 Span::styled("Close  ", Style::default().fg(Color::Gray)),
-                Span::styled(format!("{:.2}", b.close), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:.2}", b.close),
+                             Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             ]));
             pl.push(Line::from(format!("O {:.2}  H {:.2}  L {:.2}", b.open, b.high, b.low)));
         }
         if let Some(e) = &self.state.last_eval {
-            pl.push(Line::from(format!("ATR {:.2}   ADX {:.1}   RSI {:.1}",
-                e.atr.unwrap_or(0.0), e.adx.unwrap_or(0.0), e.rsi.unwrap_or(0.0))));
+            pl.push(Line::from(format!(
+                "ATR {:.2}   ADX {:.1}   RSI {:.1}",
+                e.atr.unwrap_or(0.0), e.adx.unwrap_or(0.0), e.rsi.unwrap_or(0.0)
+            )));
             if let Some(p) = e.prediction {
-                pl.push(Line::from(vec![Span::raw("P(up) "),
-                    Span::styled(format!("{:.1}%", p * 100.0), Style::default().fg(
-                        if p > 0.55 { Color::Green } else if p < 0.45 { Color::Red } else { Color::DarkGray }))]));
+                pl.push(Line::from(vec![
+                    Span::raw("P(up) "),
+                    Span::styled(
+                        format!("{:.1}%", p * 100.0),
+                        Style::default().fg(
+                            if p > 0.55 { Color::Green }
+                            else if p < 0.45 { Color::Red }
+                            else { Color::DarkGray }
+                        ),
+                    ),
+                ]));
             }
         }
-        f.render_widget(Paragraph::new(pl).block(Block::default().borders(Borders::ALL).title("PRICE")), h[0]);
+        f.render_widget(
+            Paragraph::new(pl).block(Block::default().borders(Borders::ALL).title("PRICE")),
+            h[0],
+        );
+
         let pos_lines = match &self.state.pos {
             None => vec![
                 Line::from(Span::styled("FLAT", Style::default().fg(Color::DarkGray))),
@@ -170,68 +306,145 @@ impl App {
                 let col = if upnl >= 0.0 { Color::Green } else { Color::Red };
                 let mut v = vec![
                     Line::from(vec![
-                        Span::styled(p.side.as_str(), Style::default().fg(
-                            if p.side == Side::Long { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            p.side.as_str(),
+                            Style::default().fg(
+                                if p.side == Side::Long { Color::Green } else { Color::Red }
+                            ).add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(format!("  {}", p.kind.as_str())),
                     ]),
                     Line::from(format!("Entry {:.2}   Units {:.2}", p.entry, p.units)),
                     Line::from(format!("SL {:.2}   TP {:.2}", p.sl, p.tp)),
-                    Line::from(vec![Span::raw("uPnL  "),
-                        Span::styled(format!("{}{:.2}", if upnl >= 0.0 { "+" } else { "" }, upnl), Style::default().fg(col))]),
+                    Line::from(vec![
+                        Span::raw("uPnL  "),
+                        Span::styled(
+                            format!("{}{:.2}", if upnl >= 0.0 { "+" } else { "" }, upnl),
+                            Style::default().fg(col),
+                        ),
+                    ]),
                 ];
-                if p.be_moved { v.push(Line::from(Span::styled("trail active", Style::default().fg(Color::Yellow)))); }
+                if p.be_moved {
+                    v.push(Line::from(Span::styled("trail active",
+                                                   Style::default().fg(Color::Yellow))));
+                }
                 v
             }
         };
-        f.render_widget(Paragraph::new(pos_lines).block(Block::default().borders(Borders::ALL).title("POSITION")), h[1]);
+        f.render_widget(
+            Paragraph::new(pos_lines).block(Block::default().borders(Borders::ALL).title("POSITION")),
+            h[1],
+        );
+
         let (rsi, adx) = self.state.last_eval.as_ref()
-            .map(|e| (e.rsi.unwrap_or(0.0), e.adx.unwrap_or(0.0))).unwrap_or((0.0, 0.0));
-        let ic = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Length(3)]).split(ind_a);
-        f.render_widget(Gauge::default()
-            .block(Block::default().title(format!("RSI {:.1}", rsi)))
-            .gauge_style(Style::default().fg(if rsi > 70.0 { Color::Red } else if rsi < 30.0 { Color::Green } else { Color::Cyan }))
-            .ratio((rsi / 100.0).clamp(0.0, 1.0)), ic[0]);
-        f.render_widget(Gauge::default()
-            .block(Block::default().title(format!("ADX {:.1}", adx)))
-            .gauge_style(Style::default().fg(if adx > 25.0 { Color::Green } else { Color::DarkGray }))
-            .ratio((adx / 50.0).clamp(0.0, 1.0)), ic[1]);
-        let p_up = self.state.last_eval.as_ref().and_then(|e| e.prediction).unwrap_or(0.5);
-        f.render_widget(Gauge::default()
-            .block(Block::default().title(format!("P(up) {:.0}%", p_up * 100.0)))
-            .gauge_style(Style::default().fg(if p_up > 0.55 { Color::Green } else if p_up < 0.45 { Color::Red } else { Color::DarkGray }))
-            .ratio(p_up.clamp(0.0, 1.0)), ic[2]);
+            .map(|e| (e.rsi.unwrap_or(0.0), e.adx.unwrap_or(0.0)))
+            .unwrap_or((0.0, 0.0));
+        let p_up = self.state.last_eval.as_ref()
+            .and_then(|e| e.prediction)
+            .unwrap_or(0.5);
+
+        let ic = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ]).split(ind_a);
+
+        f.render_widget(
+            Gauge::default()
+                .block(Block::default().title(format!("RSI {:.1}", rsi)))
+                .gauge_style(Style::default().fg(
+                    if rsi > 70.0 { Color::Red }
+                    else if rsi < 30.0 { Color::Green }
+                    else { Color::Cyan }
+                ))
+                .ratio((rsi / 100.0).clamp(0.0, 1.0)),
+            ic[0],
+        );
+        f.render_widget(
+            Gauge::default()
+                .block(Block::default().title(format!("ADX {:.1}", adx)))
+                .gauge_style(Style::default().fg(
+                    if adx > 25.0 { Color::Green } else { Color::DarkGray }
+                ))
+                .ratio((adx / 50.0).clamp(0.0, 1.0)),
+            ic[1],
+        );
+        f.render_widget(
+            Gauge::default()
+                .block(Block::default().title(format!("P(up) {:.0}%", p_up * 100.0)))
+                .gauge_style(Style::default().fg(
+                    if p_up > 0.55 { Color::Green }
+                    else if p_up < 0.45 { Color::Red }
+                    else { Color::DarkGray }
+                ))
+                .ratio(p_up.clamp(0.0, 1.0)),
+            ic[2],
+        );
     }
+
     fn draw_equity(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let h = &self.equity_history;
-        let (lo, hi) = h.iter().fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        let (lo, hi) = h.iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
         let range = (hi - lo).max(1.0);
-        let scaled: Vec<u64> = h.iter().map(|v| (((v - lo) / range) * 1000.0) as u64).collect();
-        f.render_widget(Sparkline::default()
-            .block(Block::default().borders(Borders::ALL)
-                .title(format!("EQUITY ${:.2} (min ${:.2} / max ${:.2})", self.state.equity, lo, hi)))
-            .data(&scaled)
-            .style(Style::default().fg(if self.state.equity >= self.cfg.initial_equity { Color::Green } else { Color::Red })), area);
+        let scaled: Vec<u64> = h.iter()
+            .map(|v| (((v - lo) / range) * 1000.0) as u64)
+            .collect();
+        f.render_widget(
+            Sparkline::default()
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    "EQUITY ${:.2} (min ${:.2} / max ${:.2})",
+                    self.state.equity, lo, hi
+                )))
+                .data(&scaled)
+                .style(Style::default().fg(
+                    if self.state.equity >= self.cfg.initial_equity {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }
+                )),
+            area,
+        );
     }
+
     fn draw_trades(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let items: Vec<ListItem> = self.state.trades.iter().rev().take(10).map(|t| {
             let col = if t.pnl >= 0.0 { Color::Green } else { Color::Red };
             let ts = chrono::DateTime::<chrono::Utc>::from_timestamp(t.exit_ts, 0)
-                .map(|d| d.format("%m-%d %H:%M").to_string()).unwrap_or_default();
+                .map(|d| d.format("%m-%d %H:%M").to_string())
+                .unwrap_or_default();
             ListItem::new(Line::from(vec![
                 Span::raw(format!("{ts}  ")),
-                Span::styled(format!("{:<5}", t.side.as_str()),
-                    Style::default().fg(if t.side == Side::Long { Color::Green } else { Color::Red })),
+                Span::styled(
+                    format!("{:<5}", t.side.as_str()),
+                    Style::default().fg(
+                        if t.side == Side::Long { Color::Green } else { Color::Red }
+                    ),
+                ),
                 Span::raw(format!(" {:<9}", t.kind.as_str())),
                 Span::raw(format!(" {:.2}→{:.2} ", t.entry, t.exit)),
-                Span::styled(format!("{:>+8.2} ({})", t.pnl, t.reason.as_str()), Style::default().fg(col)),
+                Span::styled(
+                    format!("{:>+8.2} ({})", t.pnl, t.reason.as_str()),
+                    Style::default().fg(col),
+                ),
             ]))
         }).collect();
-        f.render_widget(List::new(items)
-            .block(Block::default().borders(Borders::ALL)
-                .title(format!("RECENT TRADES ({} total, {} missed)", self.state.trades.len(), self.state.missed_trades))), area);
+        f.render_widget(
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(format!(
+                    "RECENT TRADES ({} total, {} missed)",
+                    self.state.trades.len(), self.state.missed_trades
+                ))),
+            area,
+        );
     }
+
     fn draw_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let t = " [Space] pause   [S] step   [+/-] speed   [R] reset   [Q] quit ";
-        f.render_widget(Paragraph::new(Line::from(Span::styled(t, Style::default().fg(Color::DarkGray)))), area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(t, Style::default().fg(Color::DarkGray)))),
+            area,
+        );
     }
 }

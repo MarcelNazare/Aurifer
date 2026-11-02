@@ -8,30 +8,19 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone, Copy)]
 pub struct FlowState { pub delta_ratio: f64, pub vol_ratio: f64, pub stacked: i32 }
 
-pub trait OrderFlowFeed: Send {
-    fn update(&mut self, bar: &Bar) -> Option<FlowState>;
-}
+pub trait OrderFlowFeed: Send { fn update(&mut self, bar: &Bar) -> Option<FlowState>; }
 
 pub struct ProxyOrderFlow {
-    min_delta: f64,
-    min_vol: f64,
-    vol: Sma,
-    stacked: i32,
-    last_dir: i32,
+    min_delta: f64, min_vol: f64, vol: Sma, stacked: i32, last_dir: i32,
 }
-
 impl ProxyOrderFlow {
     pub fn new(cfg: &Config) -> Self {
         Self {
-            min_delta: cfg.min_delta_ratio,
-            min_vol: cfg.min_vol_ratio,
-            vol: Sma::new(cfg.vol_sma_period),
-            stacked: 0,
-            last_dir: 0,
+            min_delta: cfg.min_delta_ratio, min_vol: cfg.min_vol_ratio,
+            vol: Sma::new(cfg.vol_sma_period), stacked: 0, last_dir: 0,
         }
     }
 }
-
 impl OrderFlowFeed for ProxyOrderFlow {
     fn update(&mut self, bar: &Bar) -> Option<FlowState> {
         let avg = self.vol.update(bar.volume)?;
@@ -45,11 +34,6 @@ impl OrderFlowFeed for ProxyOrderFlow {
         } else { self.stacked = 0; self.last_dir = 0; }
         Some(FlowState { delta_ratio: dr, vol_ratio: vr, stacked: self.stacked })
     }
-}
-
-pub struct FootprintOrderFlow { _x: i32 }
-impl OrderFlowFeed for FootprintOrderFlow {
-    fn update(&mut self, _bar: &Bar) -> Option<FlowState> { None }
 }
 
 pub struct TfAggregator { bucket: i64, cur: Option<Bar> }
@@ -109,9 +93,11 @@ impl StrategyEngine {
             bar_index: 0, rsi: Rsi::new(cfg.rsi_period), adx: Adx::new(cfg.adx_period),
             atr: Atr::new(cfg.atr_period), ema_fast: Ema::new(cfg.ema_fast),
             ema_slow: Ema::new(cfg.ema_slow), trend_ema: Ema::new(cfg.trend_ema_period),
-            tf5: TfAggregator::new(300), bb: Bollinger::new(cfg.bb_period, cfg.bb_mult),
+            tf5: TfAggregator::new(300),
+            bb: Bollinger::new(cfg.bb_period, cfg.bb_mult),
             kc: Keltner::new(cfg.kc_period, cfg.kc_mult),
-            donch: Donchian::new(cfg.donchian_period), mom: LinReg::new(cfg.squeeze_mom_period),
+            donch: Donchian::new(cfg.donchian_period),
+            mom: LinReg::new(cfg.squeeze_mom_period),
             prev_rsi: None, squeeze_active: false, bars_since_release: None, flow,
             recent_bars: VecDeque::with_capacity(61),
             predictor: None, prediction_threshold: 0.60, cfg,
@@ -150,16 +136,18 @@ impl StrategyEngine {
         if in_sq { self.squeeze_active = true; self.bars_since_release = None; }
         else if self.squeeze_active { self.squeeze_active = false; self.bars_since_release = Some(0); }
         else if let Some(n) = self.bars_since_release { self.bars_since_release = Some(n + 1); }
-        let squeeze_ok = self.bars_since_release.map(|n| n <= self.cfg.squeeze_lookback).unwrap_or(false);
+        let squeeze_ok = self.bars_since_release
+            .map(|n| n <= self.cfg.squeeze_lookback).unwrap_or(false);
 
         let flow = self.flow.update(bar);
         let trend_ready = self.trend_ema.value().is_some();
-        let trend_up = match self.trend_ema.value() { Some(e) => bar.close > e, None => false };
+        let trend_up = match self.trend_ema.value() {
+            Some(e) => bar.close > e, None => false,
+        };
         let adx_ok = adx.map(|a| a >= self.cfg.adx_min).unwrap_or(false);
 
         let mut signals: Vec<Signal> = Vec::new();
 
-        // RSI
         if trend_ready {
             if let (Some(pr), Some(rn)) = (self.prev_rsi, rsi_now) {
                 if pr < self.cfg.rsi_low && rn >= self.cfg.rsi_low && trend_up && adx_ok {
@@ -171,7 +159,6 @@ impl StrategyEngine {
             }
         }
 
-        // Breakout
         if let Some((hi, lo)) = donch_prior {
             if adx_ok {
                 if bar.close > hi { signals.push(Signal { side: Side::Long, kind: StrategyKind::Breakout }); }
@@ -179,24 +166,28 @@ impl StrategyEngine {
             }
         }
 
-        // Squeeze
         if squeeze_ok {
             if let (Some(m), Some((bu, _, bl))) = (mom, bb) {
-                if bar.close > bu && m > 0.0 { signals.push(Signal { side: Side::Long, kind: StrategyKind::Squeeze }); }
-                if bar.close < bl && m < 0.0 { signals.push(Signal { side: Side::Short, kind: StrategyKind::Squeeze }); }
+                if bar.close > bu && m > 0.0 {
+                    signals.push(Signal { side: Side::Long, kind: StrategyKind::Squeeze });
+                }
+                if bar.close < bl && m < 0.0 {
+                    signals.push(Signal { side: Side::Short, kind: StrategyKind::Squeeze });
+                }
             }
         }
 
-        // Order flow
         let mut flow_dir: i32 = 0;
         if let Some(f) = flow {
             if f.stacked.abs() >= self.cfg.required_stacked {
                 flow_dir = f.stacked.signum();
-                signals.push(Signal { side: if flow_dir > 0 { Side::Long } else { Side::Short }, kind: StrategyKind::OrderFlow });
+                signals.push(Signal {
+                    side: if flow_dir > 0 { Side::Long } else { Side::Short },
+                    kind: StrategyKind::OrderFlow,
+                });
             }
         }
 
-        // Confluence gates
         let mut filtered: Vec<Signal> = Vec::new();
         for s in signals {
             if s.kind != StrategyKind::Squeeze && self.cfg.require_squeeze_gate && !squeeze_ok { continue; }
@@ -207,7 +198,6 @@ impl StrategyEngine {
             filtered.push(s);
         }
 
-        // Prediction
         let partial = Eval {
             bar_index: self.bar_index, atr, adx, rsi: rsi_now, trend_up, trend_ready,
             squeeze_ok, flow, signals: filtered.clone(), prediction: None,
@@ -230,7 +220,9 @@ impl StrategyEngine {
         self.recent_bars.push_back(*bar);
         if self.recent_bars.len() > 60 { self.recent_bars.pop_front(); }
 
-        Eval { bar_index: self.bar_index, atr, adx, rsi: rsi_now, trend_up, trend_ready,
-               squeeze_ok, flow, signals: filtered, prediction }
+        Eval {
+            bar_index: self.bar_index, atr, adx, rsi: rsi_now, trend_up, trend_ready,
+            squeeze_ok, flow, signals: filtered, prediction,
+        }
     }
 }

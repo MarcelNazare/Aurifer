@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 
 pub const N_FEATURES: usize = 15;
 
-const FEATURE_NAMES: [&str; N_FEATURES] = [
+pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "rsi", "adx", "vol_ratio", "close_loc", "body_ratio",
     "d_ema20", "d_ema50", "ret_5", "ret_20", "ret_60",
     "streak", "squeeze", "rsi_dist", "trend_up", "volume",
@@ -23,14 +23,9 @@ pub struct PredictorConfig {
 impl Default for PredictorConfig {
     fn default() -> Self {
         Self {
-            horizon: 5,
-            label_atr_mult: 0.25,
-            epochs: 500,
-            learning_rate: 0.05,
-            l2: 0.001,
-            train_fraction: 0.70,
-            probability_threshold: 0.60,
-            min_train_bars: 500,
+            horizon: 5, label_atr_mult: 0.25,
+            epochs: 500, learning_rate: 0.05, l2: 0.001,
+            train_fraction: 0.70, probability_threshold: 0.60, min_train_bars: 500,
         }
     }
 }
@@ -66,9 +61,11 @@ pub fn extract_features(bar: &Bar, eval: &Eval, recent: &VecDeque<Bar>) -> [f64;
     let rsi_dist = (rsi - 50.0) / 50.0;
     let squeeze = if eval.squeeze_ok { 1.0 } else { 0.0 };
     let trend_up = if eval.trend_up { 1.0 } else { -1.0 };
-    [rsi / 100.0, adx / 50.0, vol_ratio, close_loc, body_ratio,
-     d_ema20, d_ema50, ret_5 / 10.0, ret_20 / 20.0, ret_60 / 40.0,
-     streak_f, squeeze, rsi_dist, trend_up, bar.volume / 1000.0]
+    [
+        rsi / 100.0, adx / 50.0, vol_ratio, close_loc, body_ratio,
+        d_ema20, d_ema50, ret_5 / 10.0, ret_20 / 20.0, ret_60 / 40.0,
+        streak_f, squeeze, rsi_dist, trend_up, bar.volume / 1000.0,
+    ]
 }
 
 fn sma_of(recent: &VecDeque<Bar>, period: usize) -> f64 {
@@ -83,8 +80,7 @@ fn atr_avg_of(recent: &VecDeque<Bar>, period: usize) -> f64 {
     let mut prev = recent[recent.len() - period - 1].close;
     for b in recent.iter().skip(recent.len() - period) {
         let tr = (b.high - b.low).max((b.high - prev).abs()).max((b.low - prev).abs());
-        sum += tr;
-        prev = b.close;
+        sum += tr; prev = b.close;
     }
     sum / period as f64
 }
@@ -95,19 +91,17 @@ pub fn make_label(bars: &[Bar], t: usize, horizon: usize, mult: f64, atr_t: f64)
 }
 
 fn sigmoid(z: f64) -> f64 {
-    if z >= 0.0 { 1.0 / (1.0 + (-z).exp()) } else { let e = z.exp(); e / (1.0 + e) }
+    if z >= 0.0 { 1.0 / (1.0 + (-z).exp()) }
+    else { let e = z.exp(); e / (1.0 + e) }
 }
 
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
-}
+fn dot(a: &[f64], b: &[f64]) -> f64 { a.iter().zip(b.iter()).map(|(x, y)| x * y).sum() }
 
 #[derive(Debug, Clone)]
 pub struct LogisticModel { pub weights: Vec<f64>, pub bias: f64 }
 
 impl LogisticModel {
     pub fn zeros(n: usize) -> Self { Self { weights: vec![0.0; n], bias: 0.0 } }
-
     pub fn train(x: &[Vec<f64>], y: &[bool], epochs: usize, lr: f64, l2: f64) -> Self {
         let n = x.len();
         if n == 0 { return Self::zeros(0); }
@@ -130,10 +124,7 @@ impl LogisticModel {
         }
         m
     }
-
-    pub fn predict_proba(&self, x: &[f64]) -> f64 {
-        sigmoid(dot(&self.weights, x) + self.bias)
-    }
+    pub fn predict_proba(&self, x: &[f64]) -> f64 { sigmoid(dot(&self.weights, x) + self.bias) }
 }
 
 #[derive(Debug, Clone)]
@@ -144,15 +135,10 @@ pub struct EvalMetrics {
 
 #[derive(Debug, Clone)]
 pub struct CalibratedPredictor {
-    pub raw: LogisticModel,
-    pub platt_a: f64,
-    pub platt_b: f64,
-    pub feature_mean: Vec<f64>,
-    pub feature_std: Vec<f64>,
-    pub config: PredictorConfig,
-    pub metrics: EvalMetrics,
-    pub auc_ci_95: (f64, f64),
-    pub brier_calibrated: f64,
+    pub raw: LogisticModel, pub platt_a: f64, pub platt_b: f64,
+    pub feature_mean: Vec<f64>, pub feature_std: Vec<f64>,
+    pub config: PredictorConfig, pub metrics: EvalMetrics,
+    pub auc_ci_95: (f64, f64), pub brier_calibrated: f64,
 }
 
 impl CalibratedPredictor {
@@ -165,7 +151,6 @@ impl CalibratedPredictor {
             .collect();
         let m = usable.len();
         anyhow::ensure!(m >= 200, "only {} usable samples", m);
-
         let i_tr = (m as f64 * 0.60) as usize;
         let i_cal = (m as f64 * 0.75) as usize;
         let tr_idx: Vec<usize> = usable[..i_tr].to_vec();
@@ -175,7 +160,8 @@ impl CalibratedPredictor {
 
         let (mean, std) = fit_scaler(&features, &tr_idx);
         let norm = |f: &[f64; N_FEATURES]| -> Vec<f64> {
-            f.iter().zip(mean.iter().zip(std.iter())).map(|(v, (m, s))| (v - m) / s).collect()
+            f.iter().zip(mean.iter().zip(std.iter()))
+                .map(|(v, (m, s))| (v - m) / s).collect()
         };
 
         let x_tr: Vec<Vec<f64>> = tr_idx.iter().map(|&i| norm(features[i].as_ref().unwrap())).collect();
@@ -206,11 +192,8 @@ impl CalibratedPredictor {
         println!("   Brier (calibrated): {:.4}", brier_cal);
         println!("   Platt a,b:          {:.3}, {:.3}", a, b);
 
-        // Feature importance: top 5 by absolute weight.
         let mut ranked: Vec<(usize, f64)> = raw.weights.iter()
-            .enumerate()
-            .map(|(i, w)| (i, w.abs()))
-            .collect();
+            .enumerate().map(|(i, w)| (i, w.abs())).collect();
         ranked.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
         println!("   top features (by |weight|):");
         for (idx, _) in ranked.iter().take(5) {
@@ -233,10 +216,19 @@ impl CalibratedPredictor {
     pub fn predict_proba(&self, features: &[f64; N_FEATURES]) -> f64 {
         let x: Vec<f64> = features.iter()
             .zip(self.feature_mean.iter().zip(self.feature_std.iter()))
-            .map(|(v, (m, s))| (v - m) / s)
-            .collect();
+            .map(|(v, (m, s))| (v - m) / s).collect();
         let logit = dot(&self.raw.weights, &x) + self.raw.bias;
         sigmoid(self.platt_a * logit + self.platt_b)
+    }
+
+    pub fn top_features_by_weight(&self, n: usize) -> Vec<(&'static str, f64)> {
+        let mut ranked: Vec<(usize, f64)> = self.raw.weights.iter()
+            .enumerate().map(|(i, w)| (i, w.abs())).collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.iter().take(n)
+            .filter(|(i, _)| *i < FEATURE_NAMES.len())
+            .map(|(i, _)| (FEATURE_NAMES[*i], self.raw.weights[*i]))
+            .collect()
     }
 }
 
@@ -267,11 +259,8 @@ pub struct FoldMetrics {
 }
 
 pub struct WalkForwardResult {
-    pub folds: Vec<FoldMetrics>,
-    pub aggregate_auc: f64,
-    pub aggregate_accuracy: f64,
-    pub worst_fold_auc: f64,
-    pub stddev_auc: f64,
+    pub folds: Vec<FoldMetrics>, pub aggregate_auc: f64, pub aggregate_accuracy: f64,
+    pub worst_fold_auc: f64, pub stddev_auc: f64,
     pub regime_summary: HashMap<&'static str, (usize, f64, f64)>,
 }
 
@@ -281,37 +270,27 @@ impl WalkForwardResult {
         anyhow::ensure!(self.aggregate_auc >= 0.54, "aggregate AUC {:.3} < 0.54", self.aggregate_auc);
         anyhow::ensure!(self.worst_fold_auc >= 0.50, "worst fold AUC {:.3} < 0.50", self.worst_fold_auc);
         let strong = self.regime_summary.values()
-            .filter(|(n, _a, auc)| *n >= 100 && *auc > 0.52)
-            .count();
+            .filter(|(n, _a, auc)| *n >= 100 && *auc > 0.52).count();
         anyhow::ensure!(strong >= 2, "only {} strong regimes (need >=2)", strong);
         Ok(())
     }
 }
 
 pub fn walk_forward_validate(
-    bars: &[Bar],
-    evals: &[Eval],
-    cfg: &PredictorConfig,
-    requested_folds: usize,
+    bars: &[Bar], evals: &[Eval], cfg: &PredictorConfig, requested_folds: usize,
 ) -> Result<WalkForwardResult> {
     let (features, labels, atrs) = build_dataset(bars, evals, cfg)?;
     let n = bars.len();
 
-    // Auto-reduce folds so each fold has ≥ min_train_bars in training.
-    // The standard expanding-window formula requires n ≥ min_train_bars × (n_folds + 1).
     let mut n_folds = requested_folds;
-    while n_folds > 1 && n / (n_folds + 1) < cfg.min_train_bars {
-        n_folds -= 1;
-    }
+    while n_folds > 1 && n / (n_folds + 1) < cfg.min_train_bars { n_folds -= 1; }
     if n_folds < 2 {
         anyhow::bail!(
-            "only {} bars — need at least {} for 2 folds with min_train_bars={}. \
-             Extend the date range (aurifer forecast --start 2015-01-01) or reduce min_train_bars.",
+            "only {} bars — need at least {} for 2 folds with min_train_bars={}",
             n, cfg.min_train_bars * 3, cfg.min_train_bars);
     }
     if n_folds < requested_folds {
-        println!("  ⚠️  reduced folds from {} to {} ({} bars, {} min_train_bars)",
-                 requested_folds, n_folds, n, cfg.min_train_bars);
+        println!("  ⚠️  reduced folds from {} to {} ({} bars)", requested_folds, n_folds, n);
     }
 
     let fold_size = n / (n_folds + 1);
@@ -319,11 +298,6 @@ pub fn walk_forward_validate(
     let mut all_regime: HashMap<&'static str, (usize, f64, f64)> = HashMap::new();
 
     for k in 1..=n_folds {
-        // Standard expanding window:
-        //   fold k trains on bars [0 .. fold_size * k]
-        //   fold k tests  on bars [fold_size * k .. fold_size * (k + 1)]
-        // Fold k = n_folds extends the test window to the end (handles
-        // non-divisible n cleanly).
         let tr_end = fold_size * k;
         let te_end = if k == n_folds { n } else { fold_size * (k + 1) };
 
@@ -338,8 +312,7 @@ pub fn walk_forward_validate(
         let (mean, std) = fit_scaler(&features, &tr);
         let norm = |f: &[f64; N_FEATURES]| -> Vec<f64> {
             f.iter().zip(mean.iter().zip(std.iter()))
-                .map(|(v, (m, s))| (v - m) / s)
-                .collect()
+                .map(|(v, (m, s))| (v - m) / s).collect()
         };
         let xt: Vec<Vec<f64>> = tr.iter().map(|&i| norm(features[i].as_ref().unwrap())).collect();
         let yt: Vec<bool>    = tr.iter().map(|&i| labels[i].unwrap()).collect();
@@ -367,9 +340,7 @@ pub fn walk_forward_validate(
                 .filter(|(p, &l)| (**p > 0.5) == l).count() as f64 / idxs.len() as f64;
             per_reg.insert(r.as_str(), (idxs.len(), acc, ra));
             let e = all_regime.entry(r.as_str()).or_insert((0, 0.0, 0.0));
-            e.0 += idxs.len();
-            e.1 += acc * idxs.len() as f64;
-            e.2 += ra * idxs.len() as f64;
+            e.0 += idxs.len(); e.1 += acc * idxs.len() as f64; e.2 += ra * idxs.len() as f64;
         }
 
         folds.push(FoldMetrics {
@@ -379,7 +350,7 @@ pub fn walk_forward_validate(
         });
     }
 
-    anyhow::ensure!(!folds.is_empty(), "no valid folds — all folds failed the min_train_bars check");
+    anyhow::ensure!(!folds.is_empty(), "no valid folds");
 
     for (n, a_s, auc_s) in all_regime.values_mut() {
         if *n > 0 { *a_s /= *n as f64; *auc_s /= *n as f64; }
@@ -406,15 +377,12 @@ pub fn walk_forward_validate(
 
     Ok(WalkForwardResult {
         folds, aggregate_auc: agg, aggregate_accuracy: acc,
-        worst_fold_auc: worst, stddev_auc: stdv,
-        regime_summary: all_regime,
+        worst_fold_auc: worst, stddev_auc: stdv, regime_summary: all_regime,
     })
 }
 
 fn build_dataset(
-    bars: &[Bar],
-    evals: &[Eval],
-    cfg: &PredictorConfig,
+    bars: &[Bar], evals: &[Eval], cfg: &PredictorConfig,
 ) -> Result<(Vec<Option<[f64; N_FEATURES]>>, Vec<Option<bool>>, Vec<f64>)> {
     let n = bars.len();
     let mut feat = Vec::with_capacity(n);
@@ -426,24 +394,14 @@ fn build_dataset(
         let bar = &bars[i];
         let eval = &evals[i];
         let atr = eval.atr.unwrap_or(0.0);
-
-        // Require 60 bars of history for ALL features to be well-defined.
-        // Without this guard, d_ema20 / d_ema50 saturate for the first 50
-        // bars of training data, and the model learns a spurious "time
-        // since start" signal instead of price-vs-EMA distance.
         let enough_history = recent.len() >= 60;
-
         let f = if eval.atr.is_some() && enough_history {
             Some(extract_features(bar, eval, &recent))
         } else { None };
-
         let l = if atr > 0.0 && enough_history {
             make_label(bars, i, cfg.horizon, cfg.label_atr_mult, atr)
         } else { None };
-
-        feat.push(f);
-        lab.push(l);
-        atrs.push(atr);
+        feat.push(f); lab.push(l); atrs.push(atr);
         recent.push_back(*bar);
         if recent.len() > 60 { recent.pop_front(); }
     }
@@ -460,7 +418,6 @@ fn fit_scaler(features: &[Option<[f64; N_FEATURES]>], idx: &[usize]) -> (Vec<f64
         }
     }
     if cnt > 0 { for m in mean.iter_mut() { *m /= cnt as f64; } }
-
     let mut var = vec![0.0; N_FEATURES];
     for &i in idx {
         if let Some(f) = &features[i] {
@@ -469,26 +426,19 @@ fn fit_scaler(features: &[Option<[f64; N_FEATURES]>], idx: &[usize]) -> (Vec<f64
             }
         }
     }
-    let std: Vec<f64> = var.iter()
-        .map(|v| (v / cnt.max(1) as f64).sqrt().max(1e-6))
-        .collect();
+    let std: Vec<f64> = var.iter().map(|v| (v / cnt.max(1) as f64).sqrt().max(1e-6)).collect();
     (mean, std)
 }
 
 fn fit_platt(model: &LogisticModel, x: &[Vec<f64>], y: &[bool]) -> (f64, f64) {
-    let mut a = 1.0;
-    let mut b = 0.0;
-    let lr = 0.05;
-    let l2 = 1e-3;
+    let mut a = 1.0; let mut b = 0.0; let lr = 0.05; let l2 = 1e-3;
     for _ in 0..200 {
-        let mut ga = 0.0;
-        let mut gb = 0.0;
+        let mut ga = 0.0; let mut gb = 0.0;
         for (xi, &yi) in x.iter().zip(y.iter()) {
             let logit = dot(&model.weights, xi) + model.bias;
             let p = sigmoid(a * logit + b);
             let err = p - if yi { 1.0 } else { 0.0 };
-            ga += err * logit;
-            gb += err;
+            ga += err * logit; gb += err;
         }
         let inv = 1.0 / x.len() as f64;
         a -= lr * (ga * inv + l2 * a);
@@ -527,17 +477,14 @@ fn auc_from_sorted(p: &[f64], y: &[bool]) -> f64 {
     let n_pos = y.iter().filter(|&&b| b).count() as f64;
     let n_neg = y.len() as f64 - n_pos;
     if n_pos == 0.0 || n_neg == 0.0 { return 0.5; }
-    let mut rank_sum = 0.0;
-    let mut rank = 1.0;
-    let mut i = 0;
+    let mut rank_sum = 0.0; let mut rank = 1.0; let mut i = 0;
     while i < pairs.len() {
         let mut k = i;
         while k < pairs.len() && (pairs[k].0 - pairs[i].0).abs() < 1e-12 { k += 1; }
         let count = (k - i) as f64;
         let avg = rank + (count - 1.0) / 2.0;
         for m in i..k { if pairs[m].1 { rank_sum += avg; } }
-        rank += count;
-        i = k;
+        rank += count; i = k;
     }
     (rank_sum - n_pos * (n_pos + 1.0) / 2.0) / (n_pos * n_neg)
 }
@@ -551,11 +498,7 @@ fn bootstrap_auc_ci(p: &[f64], y: &[bool], iters: usize) -> (f64, f64) {
     for _ in 0..iters {
         let mut ps = Vec::with_capacity(n);
         let mut ls = Vec::with_capacity(n);
-        for _ in 0..n {
-            let i = (next() as usize) % n;
-            ps.push(p[i]);
-            ls.push(y[i]);
-        }
+        for _ in 0..n { let i = (next() as usize) % n; ps.push(p[i]); ls.push(y[i]); }
         aucs.push(auc_from_sorted(&ps, &ls));
     }
     aucs.sort_by(|a, b| a.partial_cmp(b).unwrap());

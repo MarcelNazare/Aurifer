@@ -128,3 +128,31 @@ impl Default for Config {
         }
     }
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForecastSummary {
+    pub horizon: usize,
+    pub resolution: String,
+    pub last_date: String,
+    pub last_close: f64,
+    pub p_up: f64,
+    pub direction: String,
+    pub confidence: String,
+    pub edge_pct: f64,
+    pub auc: f64,
+    pub auc_ci_lo: f64,
+    pub auc_ci_hi: f64,
+    pub brier: f64,
+    pub base_rate: f64,
+    pub validated: bool,
+    pub top_features: Vec<(String, f64)>,
+}
+
+impl ForecastSummary {
+    pub fn features_line(&self) -> String {
+        self.top_features.iter()
+            .map(|(n, w)| format!("{} {:+.2}", n, w))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}

@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(long, default_value = "", global = true)]
     pub end: String,
 
-    #[arg(long, default_value = "HOUR", global = true)]
+    #[arg(long, default_value = "DAY", global = true)]
     pub resolution: String,
 
     #[arg(long, global = true)]
@@ -24,14 +24,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_open: bool,
 
-    /// Skip IG connection; use synthetic data.
     #[arg(long, global = true)]
     pub no_ig: bool,
 
     #[arg(long, global = true)]
     pub no_cache: bool,
 
-    /// Required for live trading.
     #[arg(long, global = true)]
     pub confirm_live: bool,
 

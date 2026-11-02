@@ -10,7 +10,8 @@ pub struct SampleStats {
 }
 
 pub fn analyze(trades: &[Trade], _bars_per_year: f64) -> SampleStats {
-    let n = trades.len(); let mut warnings = Vec::new();
+    let n = trades.len();
+    let mut warnings = Vec::new();
     if n == 0 {
         return SampleStats {
             n_trades: 0, win_rate: 0.0, win_rate_ci: (0.0, 1.0), breakeven_wr: 0.5,
@@ -23,18 +24,25 @@ pub fn analyze(trades: &[Trade], _bars_per_year: f64) -> SampleStats {
     let z = 1.96;
     let denom = 1.0 + z * z / n as f64;
     let center = (win_rate + z * z / (2.0 * n as f64)) / denom;
-    let margin = z * (win_rate * (1.0 - win_rate) / n as f64 + z * z / (4.0 * n as f64 * n as f64)).sqrt() / denom;
+    let margin = z * (win_rate * (1.0 - win_rate) / n as f64
+                    + z * z / (4.0 * n as f64 * n as f64)).sqrt() / denom;
     let win_rate_ci = ((center - margin).max(0.0), (center + margin).min(1.0));
+
     let wins_p: Vec<f64> = trades.iter().filter(|t| t.pnl > 0.0).map(|t| t.pnl).collect();
     let loss_p: Vec<f64> = trades.iter().filter(|t| t.pnl <= 0.0).map(|t| -t.pnl).collect();
     let avg_win = if wins_p.is_empty() { 0.0 } else { wins_p.iter().sum::<f64>() / wins_p.len() as f64 };
     let avg_loss = if loss_p.is_empty() { 1.0 } else { loss_p.iter().sum::<f64>() / loss_p.len() as f64 };
     let breakeven_wr = if avg_win + avg_loss > 0.0 { avg_loss / (avg_win + avg_loss) } else { 0.5 };
     let is_significant = win_rate_ci.0 > breakeven_wr;
-    if n < 100 { warnings.push(format!("⚠️ only {} trades — need ≥100, preferably ≥500", n)); }
+
+    if n < 100 {
+        warnings.push(format!("⚠️ only {} trades — need ≥100, preferably ≥500", n));
+    }
+
     let pnls: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
     let (pnl_ci, sharpe_ci) = bootstrap(&pnls, 1000);
     let sharpe = compute_sharpe(&pnls);
+
     if pnl_ci.0 < 0.0 && pnl_ci.1 > 0.0 {
         warnings.push("⚠️ 95% CI on total PnL crosses zero — results could be luck".into());
     }
@@ -43,8 +51,9 @@ pub fn analyze(trades: &[Trade], _bars_per_year: f64) -> SampleStats {
                               win_rate_ci.0 * 100.0, win_rate_ci.1 * 100.0, breakeven_wr * 100.0));
     }
     if sharpe_ci.0 < 0.0 {
-        warnings.push("⚠️ Sharpe 95% CI includes negative territory — edge not proven".into());
+        warnings.push("⚠️ Sharpe 95% CI includes negative territory".into());
     }
+
     SampleStats { n_trades: n, win_rate, win_rate_ci, breakeven_wr, is_significant,
                   pnl_ci, sharpe, sharpe_ci, warnings }
 }
@@ -63,7 +72,8 @@ fn bootstrap(pnls: &[f64], iters: usize) -> ((f64, f64), (f64, f64)) {
     if n < 10 { return ((0.0, 0.0), (0.0, 0.0)); }
     let mut rng = 0xDEADBEEFu64;
     let mut next = || { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng };
-    let mut totals = Vec::with_capacity(iters); let mut sharpes = Vec::with_capacity(iters);
+    let mut totals = Vec::with_capacity(iters);
+    let mut sharpes = Vec::with_capacity(iters);
     for _ in 0..iters {
         let mut sample = Vec::with_capacity(n);
         for _ in 0..n { let i = (next() as usize) % n; sample.push(pnls[i]); }

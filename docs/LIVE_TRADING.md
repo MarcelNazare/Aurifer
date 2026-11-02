@@ -1,505 +1,247 @@
 # Live Trading
 
-The highest-stakes document in this project. Read it entirely before
-setting `IG_BASE_URL` to the live endpoint.
+**Aurifer does not currently support live trading.**
+
+`aurifer live` returns an error:
+
+```
+Error: Live trading is not supported with xaus.com.
+       Use IG Markets for execution.
+```
+
+xaus.com is a data source, not a broker. The project is currently in
+**research mode** — it fetches historical data, trains models, backtests
+strategies, and prints forecasts. It does not place orders.
+
+This document explains why, and what the integration path looks like
+when you're ready to add live execution.
 
 ---
 
-## 1. Read this first
+## 1. Why no live trading
 
-**Most users who reach this step lose money.**
+Three reasons, in order of importance:
 
-The backtest that passed was probably overfit. The demo that matched
-probably got lucky. The strategy that "worked" in research often fails
-live for reasons no backtest captures: worse fills, wider spreads during
-volatility, worse adverse selection, and the psychological weight of
-real money on the line.
+### 1. The predictor does not have a validated edge
 
-This is not pessimism. It is the documented base rate. If you proceed,
-proceed with the assumption that the strategy will lose more than the
-backtest predicted, and that you will discover why only after losses.
+The current model on 10 years of daily xaus data:
 
-**The first trade should be on demo. Stay on demo until the demo works
-for 3 months.** Not 3 weeks. Three months. Long enough to see the
-strategy through multiple regimes and to catch the bugs that only appear
-on live data.
+```
+Holdout AUC:   0.474 (95% CI 0.431–0.515)
+Brier:         0.2522 (poor)
+Walk-forward:  UNVALIDATED (aggregate 0.481, worst fold 0.457)
+```
+
+Trading a model with AUC below 0.50 is a losing proposition. Live
+trading is for executing a strategy you've already proven works — not
+for discovering whether it does.
+
+### 2. xaus.com only provides data
+
+There is no `/api/v1/order` endpoint. xaus is a data vendor. To place
+orders you need a broker — IG Markets, Interactive Brokers, OANDA, or a
+similar regulated firm. Each has its own API, authentication scheme, and
+order schema.
+
+### 3. The project's own discipline forbids it
+
+`aurifer backtest` prints `🚫 DO NOT TRADE LIVE` when a strategy fails
+significance checks. `aurifer forecast` prints `⚠️  UNVALIDATED` when the
+model fails walk-forward. `aurifer live` refuses to run because the
+prerequisite — a validated edge — doesn't exist.
+
+This isn't obstruction. It's the design. The whole point of Aurifer is
+to prevent the failure mode where someone wires up a broker account to a
+backtest that looked good once, and loses money in a week.
 
 ---
 
-## 2. Pre-flight checklist
+## 2. When live trading would make sense
 
-All must be true before `IG_BASE_URL` points at the live endpoint:
+The sequence is not negotiable. All of these must be true:
 
-- [ ] **Backtest passed on 3+ years of data.**
-      Walk-forward validation cleared (aggregate AUC ≥ 0.54, no fold < 0.50,
-      ≥ 2 regimes with edge). If the predictor was auto-disabled, that
-      means walk-forward failed — respect it, don't trade the predictor.
+- [ ] **Predictor validates on 3+ years of data.**
+      Walk-forward AUC CI lower bound ≥ 0.54 across the full window.
+      Current status: fails (AUC 0.474).
 
-- [ ] **Backtest passed on a second calendar year.**
-      The first year being profitable is not enough. Year 2 must also pass.
-      If year 2 failed, the strategy does not have a tradeable edge.
+- [ ] **Rule-based strategies show edge.**
+      `aurifer backtest --no-predictor` reports `Significant: YES` with
+      PnL CI not crossing zero. Current status: untested.
 
-- [ ] **Demo account has traded for 3+ months.**
-      Compare demo results against the backtest over the same period. If
-      demo loses money where backtest was profitable, the backtest is
-      wrong — the market changed, or the backtest has a bug, or the fill
-      model was too optimistic.
+- [ ] **Backtest on a different calendar year.** The first pass might be
+      luck. Test on 2022 (downtrend) and 2024 (uptrend) separately.
+      Current status: untested.
 
-- [ ] **Realized adverse gap ≤ 1.5 × modeled slippage.**
-      Printed at the end of every run. If it's higher, the backtest's
-      cost model is optimistic — raise `Config::slippage` and re-run
-      before going live.
+- [ ] **Demo account has traded for 3+ months.** Compare demo results
+      against the backtest over the same period. Current status: no
+      broker integration exists.
 
-- [ ] **You understand every parameter in `Config`.**
-      Not "I read the docs." You can explain why each default is what it
-      is, and what happens if you change it. `docs/STRATEGY.md` is the
-      reference.
+- [ ] **Realized adverse gap ≤ 1.5 × modeled slippage.** Printed at the
+      end of every backtest once a broker is wired in. Current status:
+      not applicable (no broker).
 
-- [ ] **You have a manual kill switch.**
-      See §7. You know how to close positions via the IG app or web
-      interface if the program stops responding.
+- [ ] **You understand every parameter in `Config`.** Not "I read the
+      docs." You can explain why each default is what it is, and what
+      happens if you change it. See `docs/STRATEGY.md`.
 
-- [ ] **You can afford to lose the entire account balance.**
-      Not "it would hurt." Not "I would learn something." The full balance,
-      gone, and you are still financially intact. If not, do not trade live.
+- [ ] **You have a manual kill switch.** Every broker has a web interface
+      or mobile app where you can close positions manually. You know
+      where it is before you start.
 
-If any box is unchecked, stop. Do not go to §3.
+- [ ] **You can afford to lose the entire account balance.** Not "it
+      would hurt." The full balance, gone, and you are still financially
+      intact.
+
+If any box is unchecked, live trading is not appropriate yet.
 
 ---
 
-## 3. IG setup
+## 3. The integration path
 
-### 3.1 Create an IG account
+When you have a validated strategy and decide to add live execution,
+here is the shape of the work.
 
-1. Go to `https://www.ig.com/` and click "Create live account."
-   **Demo accounts can be created first** at `https://www.ig.com/en/demo-account`,
-   and you can generate API keys for demo.
-2. Complete KYC — ID verification, address, tax residency.
-3. Complete the appropriateness questionnaire (required for CFD providers).
-4. Wait for verification. Typically 1–3 days.
+### Add a broker client to `src/broker.rs`
 
-### 3.2 Generate an API key
-
-Once verified:
-
-1. Log in to your IG account.
-2. **My IG → Settings → API Keys → Generate New Key.**
-3. You will receive an API key. Save it — you cannot retrieve it later.
-4. Note your **IG username**, **password**, and **account ID** (visible in
-   the account dropdown on IG's web interface).
-
-### 3.3 Configure `.env`
-
-```dotenv
-IG_USERNAME=your_ig_username
-IG_PASSWORD=your_ig_password
-IG_API_KEY=your_api_key
-IG_ACCOUNT_ID=your_account_id
-
-# Demo (default)
-IG_BASE_URL=https://demo-api.ig.com/gateway/deal
-
-IG_GOLD_EPIC=CS.D.CFDGOLD.CFDGC.IP
-IG_ORDER_SIZE=1.0
-```
-
-### 3.4 Confirm demo mode
-
-Before starting the live loop, verify the endpoint:
-
-```bash
-grep IG_BASE_URL .env
-# must contain "demo" until you're past §2 pre-flight
-```
-
-Then run:
-
-```bash
-aurifer live --confirm-live
-```
-
-The startup line will print:
-
-```
-▶ IG live loop (DEMO) — epic CS.D.CFDGOLD.CFDGC.IP
-```
-
-If it says `🔴 LIVE MONEY`, stop immediately and check `.env`.
-
-### 3.5 Find your gold epic
-
-IG assigns epics per account type. The default
-`CS.D.CFDGOLD.CFDGC.IP` is the 100-oz spot gold CFD on most accounts, but
-your entity or account type may have a different one.
-
-**Before your first trade:**
-
-1. Log in to IG web.
-2. Search for "gold" in the market search.
-3. Note the epic of the instrument you want to trade.
-4. Put it in `IG_GOLD_EPIC` in `.env`.
-
-Or from code:
+The cleanest structure is a second broker type alongside `XausBroker`:
 
 ```rust
-let results = broker.search("gold").await?;
-for (epic, name) in results { println!("{epic}  {name}"); }
+pub struct IgBroker { /* ... */ }
+pub struct OandaBroker { /* ... */ }
+pub struct IbkrBroker { /* ... */ }
 ```
 
-The epic in `.env` must match exactly, or the bot will silently trade
-nothing (IG rejects unknown epics, and `broker.rs` returns the error to
-the live loop, which logs it but does not halt — a silent failure mode
-you must check for on startup).
-
----
-
-## 4. The opt-in gate
-
-Real money requires **two** explicit conditions:
-
-1. `IG_BASE_URL` in `.env` must point at the live endpoint
-   (`https://api.ig.com/gateway/deal`, no "demo" substring).
-2. `--confirm-live` flag on the command line.
-
-**Both** are required. A typo in `.env` that accidentally points at live
-will not trade without `--confirm-live`; and `--confirm-live` alone with
-`IG_BASE_URL` still on demo does not trade real money.
-
-**To test the gate itself without risking money:**
-
-```bash
-# This will refuse to start:
-aurifer live
-# → Error: Live mode requires --confirm-live. This places REAL orders.
-
-# This will trade demo (IG_BASE_URL has "demo"):
-aurifer live --confirm-live
-# → ▶ IG live loop (DEMO) — epic CS.D.CFDGOLD.CFDGC.IP
-```
-
-Both messages are correct. If you see `LIVE MONEY` when you expected
-`DEMO`, stop and check `.env`.
-
----
-
-## 5. The startup sequence
-
-### 5.1 What the program prints
-
-On a healthy start:
-
-```
-✅ IG connected — epic CS.D.CFDGOLD.CFDGC.IP
-▶ IG live loop (DEMO) — epic CS.D.CFDGOLD.CFDGC.IP
-Primed with 200 bars
-▶ Polling IG snapshot every 2s. Ctrl-C to stop.
-```
-
-Then silence, punctuated by:
-- `✅ LONG SQUEEZE 1.00 @ 2034.50 — deal ref XXXX` when a trade opens
-- `snapshot error: ...` if the IG API hiccups (transient, self-recovers)
-
-### 5.2 What each line means
-
-- **`✅ IG connected`** — login succeeded. Credentials are valid.
-- **`epic CS.D.CFDGOLD.CFDGC.IP`** — which instrument is being traded.
-  **Verify this matches what you expect.**
-- **`▶ IG live loop (DEMO)`** — demo vs live. Verify before every run.
-- **`Primed with 200 bars`** — the warm-up succeeded. Indicators are
-  computed. If this fails, the bot has no signal to work from.
-- **`Polling IG snapshot every 2s`** — the live loop is running.
-  Bars are built from 2-second snapshots; a new bar closes every 60 s.
-
-### 5.3 What an unhealthy run looks like
-
-Signs to abort immediately:
-
-- **`⚠️ IG connection failed`** on startup → the bot is not connected.
-  It will exit before trading.
-- **`epic unknown`** or `market not found` → `.env` epic is wrong. Nothing
-  will trade.
-- **`snapshot error` repeated 5+ times in 10 seconds** → IG API is down
-  or rate limit exceeded. Stop, wait, retry.
-- **`❌ order failed: ...`** → an order was rejected. Read the error.
-  Common causes: insufficient margin, market closed, epic disabled for
-  your account.
-- **Silence for 30+ minutes on a market that's open** → the live loop is
-  hung. Ctrl-C, restart.
-
-### 5.4 What a healthy run looks like
-
-- One snapshot fetch every 2 seconds
-- A new bar closed every 60 seconds
-- Occasionally, a signal fires and an order is placed
-- Position management (SL/TP) handled automatically by IG after order fill
-- No `error` or `warn` lines except occasional transient `snapshot error`
-
-If you see sustained healthy output for a day, the plumbing works. The
-strategy's profitability is a separate question — the plumbing working
-tells you nothing about whether the strategy is good.
-
----
-
-## 6. The runbook
-
-### 6.1 Position management
-
-**The program handles SL/TP automatically** once an order fills. IG
-maintains the stop and limit orders on their side. If the program
-crashes, the SL and TP remain active at IG — you are protected by the
-broker's own stop mechanism, not by the program staying alive.
-
-**You should still check daily:**
-
-- Open positions match what the program thinks it opened
-- SL and TP are set on each position (visible in IG web/app)
-- No orphaned positions (open at IG, but not tracked by `SessionState` —
-  this happens if the program crashes between placing an order and
-  recording it)
-
-**If you find a discrepancy:** close the position manually via IG, then
-restart the program. Do not try to reconcile by having the program "adopt"
-the orphan position — the position sizing math will be wrong.
-
-### 6.2 Daily review
-
-Every day, at end of session:
-
-1. **Open positions.** Any position older than `max_seconds_in_trade`
-   should have been closed by the time stop. If you see one open for
-   hours, the program is misbehaving.
-2. **Trades taken.** Did the program trade when you expected? If not, was
-   it a signal issue (no signal fired) or an execution issue (order
-   rejected)?
-3. **Realized PnL.** Compare against what the strategy "should" have done
-   on today's bars. Large divergence means something is off.
-
-### 6.3 Weekly review
-
-1. **Equity curve.** Rising, falling, flat? Compare against the backtest
-   window covering the same dates.
-2. **Trade count.** Wildly more or fewer trades than the backtest window
-   covering the same dates → regime has changed, or the bot is
-   malfunctioning.
-3. **Slippage.** Realized fills vs. `entry` price recorded by
-   `SessionState`. If the gap is growing, the market is getting less
-   liquid, or IG's spreads are widening — consider raising
-   `Config::slippage` in the backtest and re-evaluating.
-
-### 6.4 Monthly review
-
-1. **Rerun the backtest** on the past 6 months. Compare walk-forward
-   results to the last backtest. If the model now fails validation, the
-   regime has shifted — consider stopping live trading.
-2. **Retrain the predictor** on the latest 6 months. The current model
-   was trained on data that ends before the last 3 months — if those 3
-   months were a new regime, the model is stale.
-3. **Review the SAMPLE SIZE** of your live trades. If you have 100+
-   live trades and the realized win rate is significantly below the
-   backtest's 95% CI lower bound, the backtest was optimistic — stop and
-   diagnose.
-
-### 6.5 When to shut down
-
-Stop live trading — permanently or until you diagnose — if any of these
-happen:
-
-- **Walk-forward validation fails on fresh data.** Run the backtest on
-  the last 6 months; if it fails validation now, the edge is gone.
-- **Realized Sharpe CI turns negative.** Not "has a drawdown" — the
-  95% CI on the live trades' Sharpe ratio goes below zero.
-- **Realized slippage keeps growing.** If the average realized adverse
-  gap is > 2× the modeled slippage for two weeks straight, the
-  backtest is far too optimistic.
-- **You're watching the program more than it's working.** If you check
-  the app every 15 minutes and feel anxiety about the PnL, you are not
-  trading — you are gambling with extra steps. Stop.
-- **A code change is pending.** Never leave a bot running while you edit
-  `broker.rs`. Kill the process, make the change, rebuild, restart.
-
----
-
-## 7. Kill switch
-
-### 7.1 Normal shutdown
-
-```bash
-Ctrl-C
-```
-
-The live loop is `while let ... { }` — Ctrl-C aborts it immediately. Open
-positions are **not** closed automatically. You must close them via IG.
-
-**Before you Ctrl-C:** check for open positions. If any exist, close them
-via IG web/app first, then Ctrl-C.
-
-### 7.2 Emergency close
-
-If the program is unresponsive and a position is open:
-
-1. **Open IG web interface** (`https://www.ig.com/`) or the IG mobile app.
-2. **Find the open position.**
-3. **Close it** using the "Close" button.
-
-Do not try to close via the program. If it is unresponsive, it cannot
-place orders reliably.
-
-### 7.3 Network drop mid-trade
-
-If the network drops while a position is open:
-
-- **The position remains open at IG.** SL and TP are still active because
-  IG holds them, not the local process.
-- The program will try to reconnect when the network returns.
-- On reconnect, the local `SessionState` will be **out of sync** with
-  IG's actual positions — the bot thinks it opened at price X, but the
-  actual fill may have been at price Y, or the position may have been
-  closed by SL/TP while the program was offline.
-
-**After a network drop:**
-
-1. Close all positions manually via IG.
-2. Restart the program.
-3. Do not let the bot "catch up" — it cannot reconcile state it never saw.
-
-### 7.4 Process crash mid-trade
-
-Same as §7.3. The bot has no way to know what IG did while it was dead.
-Manual close, restart, re-verify.
-
----
-
-## 8. What to do when something goes wrong
-
-### 8.1 Stream disconnected
-
-```
-snapshot error: ...
-```
-
-The polling loop prints this and continues. IG's API has occasional
-hiccups; a single error is transient.
-
-**If errors repeat 5+ times in 10 seconds:** stop the program, check IG
-status page, wait 30 minutes, restart.
-
-**If errors repeat for hours:** the epic may have been disabled, or your
-API key may have been revoked. Check the IG dashboard.
-
-### 8.2 Order rejected
-
-```
-❌ order failed: ...
-```
-
-The error message from IG will say why. Common cases:
-
-| Error | Cause | Fix |
+Each implements:
+- `connect() -> Result<Self>` — authenticate
+- `place_market_order(side, size, sl, tp) -> Result<String>` — place and
+  return the broker's confirmation ID
+- `snapshot() -> Result<(f64, f64)>` — live bid/ask
+- `close_all() -> Result<()>` — emergency close
+
+xaus stays in place for the historical data path. The two brokers
+operate in different worlds:
+
+| Concern | xaus.com | Broker |
 |---|---|---|
-| `MARKET_CLOSED` | Market is closed (weekend, holiday) | Wait, or check `trade_weekends` in Config |
-| `INSUFFICIENT_FUNDS` | Account balance below margin requirement | Reduce `IG_ORDER_SIZE` or deposit |
-| `MARKET_NOT_BORROWABLE` | Can't short this instrument right now | Close the program, do not trade until resolved |
-| `EPIC_DISABLED` | The epic is not tradeable on your account | Search for gold again, update `IG_GOLD_EPIC` |
-| `RATE_LIMIT` | Too many API calls | Raise the polling interval (currently 2s) |
+| Historical bars | ✅ primary | ⚠️ may be limited |
+| Live prices | ✅ spot quote | ✅ bid/ask |
+| Order placement | ❌ | ✅ |
+| Account state | ❌ | ✅ |
+| Position tracking | ❌ | ✅ |
 
-**Do not retry a rejected order immediately.** IG logs each attempt; a
-loop of rejections may trigger a temporary block. Diagnose first.
-
-### 8.3 Fills worse than expected
-
-If `realized_adverse_gap` (printed at backtest end, and tracked in the
-live loop) is consistently > 1.5 × `Config::slippage`:
-
-- The market is less liquid than the backtest assumed
-- IG's spreads on gold have widened
-- Your position size is too large relative to available liquidity
-
-**Action:** raise `Config::slippage` in the backtest, re-run, and see if
-the strategy still looks tradeable. If it doesn't, stop live trading.
-
-### 8.4 Equity drawdown exceeds daily limit
-
-`SessionState` halts trading for the day at `daily_loss_limit` (2% by
-default). Existing positions are still managed (SL/TP still fires).
-
-**The halt is automatic.** Do not override it. Do not restart to
-"reset" the halt — the daily loss is real, and re-enabling trading
-the same day means the strategy has not learned anything from the loss.
-
-Wait until the next UTC midnight. The halt lifts automatically.
-
----
-
-## 9. Retraining workflow
-
-The predictor is trained once at program startup, on data loaded from
-IG. In practice:
-
-### 9.1 When to retrain
-
-- **Weekly:** retrain on the last 6 months. If the new model fails
-  walk-forward, disable the predictor.
-- **After a regime shift:** if the live PnL diverges sharply from the
-  backtest on the same period, retrain on the recent data.
-- **After a code change to feature extraction:** always retrain. Never
-  mix features from two versions of the code.
-
-### 9.2 How to retrain
-
-The program retrains on every startup. There is no separate "retrain"
-command. To retrain on fresh data:
-
-```bash
-# Pull the last 1000 bars from IG (about 16 hours)
-aurifer backtest --start 2024-01-01 --end 2024-01-02
-
-# The walk-forward validation uses those bars. If it passes, the model
-# is fresh. If it fails, the predictor is disabled.
-```
-
-**For longer retraining windows:**
-
-IG caps single requests at ~1000 bars. To retrain on 6 months of 1-minute
-data (~130,000 bars), you need to fetch bars in chunks and concatenate
-them — the current code does not do this. Add a chunked fetcher in
-`data.rs` when you need it:
+### Add a `LiveBroker` trait
 
 ```rust
-async fn fetch_chunked(broker: &IgBroker, days: i64) -> Result<Vec<Bar>> {
-    // fetch day by day, concatenate, sort by ts
+#[async_trait]
+pub trait LiveBroker: Send + Sync {
+    async fn place_market_order(
+        &self, side: Side, size: f64,
+        sl: Option<f64>, tp: Option<f64>,
+    ) -> Result<String>;
+    async fn snapshot(&self) -> Result<(f64, f64)>;
+    async fn close_all(&self) -> Result<()>;
 }
 ```
 
-Until then, retraining is limited to the last ~16 hours of 1-minute data.
-This is enough for daily recalibration but not for retraining on a
-different regime.
+`XausBroker` does not implement this. The IG/OANDA/IBKR clients do.
+`run_live_trading` takes `Box<dyn LiveBroker>` and the rest of the loop
+is unchanged from the previous version.
 
-### 9.3 Swapping the model without stopping
+### Add two opt-in gates
 
-Not supported. Stop the program, restart with fresh data, accept the
-gap in live coverage. There is no "hot-swap" path, and trying to build
-one adds risk without benefit.
+Real money requires **two** explicit conditions:
+
+1. An environment variable (e.g. `IG_LIVE=1`) that flips the broker
+   client from demo to live endpoint.
+2. A `--confirm-live` flag on the command line.
+
+**Both** are required. A typo in `.env` that accidentally points at live
+will not trade without `--confirm-live`; and `--confirm-live` alone with
+the endpoint still on demo does not trade real money.
+
+This is a lesson learned from the previous IG integration. Real
+credentials are easy to leak; real money is easy to move. Two
+independent gates make accidental live trading unlikely.
+
+### Keep the local state conservative
+
+The live loop's `SessionState` must **lag** the broker:
+
+```rust
+// Do NOT do this:
+state.pos = Some(Position { ... });
+let result = broker.place_market_order(...).await;
+// If the order was rejected, state.pos is now wrong.
+
+// Do this:
+let result = broker.place_market_order(...).await?;
+// Only update state after the broker confirms.
+state.pos = Some(Position { ... });
+```
+
+Optimistic local state is how bots end up with orphaned positions —
+positions open at the broker that the bot doesn't know about, so the
+next sizing calculation is wrong.
+
+### Handle partial fills
+
+A 10-unit order might fill as 3 + 4 + 3 at different prices. The
+broker's confirmation includes the actual fill price and size. Use
+those, not the requested values.
+
+```rust
+let fill = broker.place_market_order(...).await?;
+let actual_units = fill.filled_units;   // not the requested `units`
+let actual_price = fill.avg_fill_price; // not the requested `entry`
+```
+
+### Add a kill switch
+
+Every broker has a web interface. Your runbook should include:
+
+1. **Normal shutdown:** Ctrl-C the program. Open positions remain at the
+   broker — SL and TP are already set from the entry, so they still fire.
+2. **Emergency close:** open the broker's web interface, close the
+   position manually.
+3. **Network drop mid-trade:** the position remains open at the broker.
+   After reconnect, **do not let the bot "catch up"** — close manually,
+   restart clean.
+4. **Process crash mid-trade:** same as network drop. The bot cannot
+   reconcile state it never saw.
+
+See the previous version of this document (preserved in git history)
+for the full runbook. The essentials are: verify open positions daily,
+compare live PnL to backtest on the same period weekly, and stop if
+Sharpe CI turns negative on the live trades.
 
 ---
 
-## 10. When to shut down
+## 4. What not to do
 
-Live trading is a process, not a state. The conditions to stop are the
-same as the conditions to not start:
+- **Don't run `aurifer live` today.** It errors out. That's the correct
+  behavior until the strategy validates.
+- **Don't ask "but what if I just try it small?"** The demo is there to
+  test infrastructure. Trading on a backtest that failed significance
+  checks — even "just a little" — is choosing to lose money slowly.
+- **Don't add execution "for convenience" while the predictor fails.**
+  The temptation is real. The correct sequence is research → demo →
+  live. Not research → live (because you got impatient).
 
-- **Walk-forward validation fails on fresh data** → the edge is gone
-- **Live PnL diverges from backtest** → the backtest was wrong, or the
-  regime changed
-- **Realized slippage is 2×+ modeled** → the cost model was optimistic;
-  the strategy loses after real costs
-- **Sharpe CI on live trades includes negatives** → not enough evidence
-  of an edge
-- **You are anxious about the PnL** → you are gambling, not trading
+---
 
-**The correct response to any of these is not "adjust parameters."** It
-is to stop, return to `docs/VALIDATION.md`, and ask whether the strategy
-ever had a real edge. Most of the time, the answer is no.
+## 5. The honest summary
 
-That is not a failure. It is the honest outcome of research. The failures
-worth worrying about are the ones that look like success because no one
-checked.
+**Aurifer is a research instrument.** It tells you when a strategy has
+an edge — and refuses to trade when it doesn't. The current model has no
+edge on daily gold. That's not a problem to solve; it's an answer.
+
+The path to live trading is:
+
+1. Find a strategy that passes walk-forward validation.
+2. Run it on demo for 3 months.
+3. Compare demo to backtest.
+4. Only then add the broker client and wire up real execution.
+
+Until step 1 is done, live trading is a distraction from the actual work.
+
+**The "DO NOT TRADE LIVE" verdict is not a bug. It is the point.**

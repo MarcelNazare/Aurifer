@@ -12,8 +12,8 @@ coupled — tuning one moves three others out of equilibrium.
 
 ### Why five families?
 
-No single signal reliably produces edge on 1-minute gold. Each family
-exploits a different regime:
+No single signal reliably produces edge on gold. Each family exploits a
+different regime:
 
 | Family | Works when | Hurts when |
 |---|---|---|
@@ -50,19 +50,22 @@ behavior. Default: off.
 ### Entry rule
 
 **Long:**
-- 1-minute RSI(14) crosses **up** through 30 (was <30, now ≥30)
-- 5-minute close is above EMA(200)  ← trend filter
-- 1-minute ADX(14) ≥ 20           ← motion filter
+- 1-bar RSI(14) crosses **up** through 30 (was <30, now ≥30)
+- 5-bar close is above EMA(200)  ← trend filter
+- 1-bar ADX(14) ≥ 20            ← motion filter
 
 **Short:**
-- 1-minute RSI(14) crosses **down** through 70
-- 5-minute close is below EMA(200)
-- 1-minute ADX(14) ≥ 20
+- 1-bar RSI(14) crosses **down** through 70
+- 5-bar close is below EMA(200)
+- 1-bar ADX(14) ≥ 20
+
+(At `--resolution DAY`, "1-bar" means 1-day, "5-bar" means 5-day. The
+same logic applies to HOUR and MINUTE.)
 
 ### Why crosses, not levels
 
 If the rule were "RSI < 30," a sustained oversold reading (RSI sitting at
-28 for 20 minutes) would fire the signal on every one of those bars. The
+28 for 20 bars) would fire the signal on every one of those bars. The
 cross fires exactly once per oversold excursion, which matches what you
 would actually trade.
 
@@ -70,7 +73,7 @@ would actually trade.
 
 Without it, RSI mean-reversion fades every push in a strong trend — the
 most expensive failure mode of the strategy. Requiring price above the
-5-min EMA(200) for longs means you only fade pullbacks in an uptrend,
+5-bar EMA(200) for longs means you only fade pullbacks in an uptrend,
 which is statistically a different (and better) trade.
 
 ### Why the ADX filter
@@ -85,8 +88,8 @@ signals. ADX ≥ 20 filters out the flattest regimes. Without it, RSI fires
   push through the filter level and then keep going.
 - **News spikes:** RSI can hit 30 or 70 and reverse on the same bar,
   producing a signal you cannot actually fill.
-- **Session opens:** the first 10 minutes after London open often produce
-  RSI whipsaws that trigger both long and short within minutes.
+- **Session opens:** the first few bars after a session opens often
+  produce RSI whipsaws that trigger both long and short within minutes.
 
 ### Which regimes it works in
 
@@ -97,11 +100,11 @@ and dead-flat ranging.
 
 | Param | Value | Rationale |
 |---|---|---|
-| `rsi_period` | 14 | Wilder's original; 14 minutes is a reasonable "short-term" |
+| `rsi_period` | 14 | Wilder's original; 14 bars is a reasonable "short-term" |
 | `rsi_low` / `rsi_high` | 30 / 70 | Classic thresholds; tighter (25/75) reduces trades without helping PnL |
 | `adx_period` | 14 | Standard; ADX is noisy below 14 |
 | `adx_min` | 20 | Below this, ADX doesn't distinguish trend from chop |
-| `trend_ema_period` | 200 (5-min) | ~16 hours of price — long enough to survive intraday noise |
+| `trend_ema_period` | 200 (5-bar) | 200 five-bar candles = 1000 bars of history — enough to survive intraday noise |
 
 ---
 
@@ -136,13 +139,14 @@ but it eliminates the worst regime.
   short signals fire repeatedly, each losing a tick or two.
 - **News breakouts:** a gap through the prior high can close back below it
   before the next bar — the signal fires, then reverses immediately.
-- **Session opens:** the London/NY handover frequently has fake breakouts.
+- **Session opens:** the handover between major sessions frequently has
+  fake breakouts.
 
 ### Default parameters and why
 
 | Param | Value | Rationale |
 |---|---|---|
-| `donchian_period` | 10 | ~10 minutes; longer windows miss short-term ranges |
+| `donchian_period` | 10 | 10 bars; longer windows miss short-term ranges |
 | `adx_min` | 20 | Same threshold as RSI |
 
 ---
@@ -183,12 +187,11 @@ higher win rate.
 
 ### Known failure modes
 
-- **Squeeze persists for hours:** in low-volatility regimes (Asian
-  session), the squeeze may never release. Positions opened on hope lose
-  to noise.
-- **Double release:** a squeeze can release, then compress again within
-  a few minutes, producing two signals in the same direction. The
-  lookback window (3 bars) mitigates this but doesn't eliminate it.
+- **Squeeze persists for hours/days:** in low-volatility regimes, the
+  squeeze may never release. Positions opened on hope lose to noise.
+- **Double release:** a squeeze can release, then compress again within a
+  few bars, producing two signals in the same direction. The lookback
+  window (3 bars) mitigates this but doesn't eliminate it.
 
 ### Default parameters and why
 
@@ -196,7 +199,7 @@ higher win rate.
 |---|---|---|
 | `bb_period` / `bb_mult` | 20 / 2.0 | Standard; 2σ captures ~95% of recent range |
 | `kc_period` / `kc_mult` | 20 / 1.5 | Standard; 1.5 × ATR matches BB scale |
-| `squeeze_mom_period` | 12 | LinReg on 12 bars responds to 15–30 min moves |
+| `squeeze_mom_period` | 12 | LinReg on 12 bars responds to short-term moves |
 | `squeeze_lookback` | 3 | Long enough to catch the release bar, short enough to avoid stale signals |
 
 ---
@@ -206,6 +209,11 @@ higher win rate.
 **⚠️ This is a proxy, not footprint data.** Real stacked-imbalance requires
 a paid feed (Databento, CQG). The proxy uses bar close location and volume
 ratio as a stand-in.
+
+**⚠️ xaus.com provides mid-price OHLCV.** Volume is reported by the
+upstream feed but is not tick trade volume — it's an aggregate. The
+order-flow proxy is therefore weaker on xaus data than it would be on a
+broker feed with real trade count.
 
 ### Entry rule
 
@@ -234,6 +242,9 @@ direction is a microtrend — a real pattern, if a weak one. The default of
   follow-through is zero — you buy the top of a spike.
 - **Trend days:** every bar closes near its high in a strong uptrend, so
   the proxy fires constantly and takes every pullback in the face.
+- **Mid-price volume distortion:** because xaus reports mid-price volume
+  rather than true bid/ask trade volume, the `vol_ratio` can spike on
+  wide-spread bars that saw little actual trade activity.
 
 ### Default parameters and why
 
@@ -263,27 +274,53 @@ the implied edge at threshold 0.60 with base AUC 0.52 is negligible.
 
 ### What "P(up)" actually means
 
-`P(close[t + horizon] − close[t] > 0.30 × ATR[t])`. That is, the
-probability that price rises by more than 30% of one ATR over the next
-30 bars. It is **not** "probability price goes up at all" — the label has
-a threshold, which is why the model can have apparent 55% directional
+`P(close[t + horizon] − close[t] > label_atr_mult × ATR[t])`. That is,
+the probability that price rises by more than a fraction of one ATR over
+the next `horizon` bars.
+
+Defaults:
+- `horizon = 5` — predict 5 bars ahead
+- `label_atr_mult = 0.25` — require a move > 25% of ATR
+
+It is **not** "probability price goes up at all" — the label has a
+threshold, which is why the model can have apparent 55% directional
 accuracy but only 30% actionable signal rate.
 
 ### Why no point prediction
 
-See `docs/VALIDATION.md` §6. Short answer: at 1-minute resolution, gold's
-noise is larger than any predictable signal by 10–100×. A point
-prediction would be off by 20+ times the spread; the threshold-based
-binary classification is the only prediction with measurable edge.
+See `docs/VALIDATION.md` §6. Short answer: at daily resolution, gold's
+noise is larger than any predictable signal by 5–20×. A point prediction
+would be off by more than the spread; the threshold-based binary
+classification is the only prediction with a chance of measurable edge.
 
 ### Known failure modes
 
-- **Regime shift:** a model trained on 2023 fails on 2024 if the market
-  character changes. This is why walk-forward has per-regime breakdowns.
+- **Regime shift:** a model trained on 2016–2021 fails on 2022–2026 if the
+  market character changes. This is why walk-forward has per-regime
+  breakdowns.
 - **Calibration drift:** Platt scaling fitted on 15% of the data may not
   hold on new data if the base rate changes.
 - **Threshold overfitting:** if you tune `probability_threshold` against
   the backtest, you are overfitting — walk-forward must be re-run.
+- **Secular trend capture:** if the training window is mostly bullish
+  (gold tripled 2016–2026), the model learns "gold goes up" and its
+  apparent edge is really just the base rate. Check the base rate — at
+  horizon 30, base rate can be 60%+, at which point "always predict up"
+  would be competitive with the model.
+
+### Baseline result on xaus daily data
+
+10 years, 5-day horizon, 15 features:
+
+```
+Holdout AUC: 0.474 (95% CI 0.431–0.515)
+Base rate:   50.7%
+Brier:       0.2522 (poor)
+```
+
+The model has no demonstrated edge at this horizon with these features.
+That's the honest answer, not a bug. See `docs/VALIDATION.md` for the
+next experiments.
 
 ---
 
@@ -301,9 +338,8 @@ fired the signal.
 - Too tight (< 1×ATR): normal noise stops you out — win rate collapses.
 - Too wide (> 3×ATR): losses hurt more than wins help — expectancy goes
   negative even at 60% win rate.
-- 1.5×ATR is the empirical sweet spot on gold 1-minute: 1.5 removes most
-  noise stops while keeping losing trades small enough to survive a
-  losing streak.
+- 1.5×ATR is the empirical sweet spot: it removes most noise stops while
+  keeping losing trades small enough to survive a losing streak.
 
 ### Take profit
 
@@ -346,7 +382,15 @@ The backtest improvement from partials is +5–10% on total PnL.
 
 ### Time stop
 
-Force-close if `bar.ts − entry_ts > max_seconds_in_trade` (default 1800 = 30 min).
+Force-close if `bar.ts − entry_ts > max_seconds_in_trade`.
+
+Defaults, scaled by resolution in `apply_resolution_defaults`:
+
+| Resolution | `max_seconds_in_trade` | `max_bars_in_trade` |
+|---|---|---|
+| MINUTE | 1800 (30 min) | 30 |
+| HOUR | 86400 (24 h) | 24 |
+| DAY | 604800 (7 days) | 7 |
 
 **Why wall-clock, not bars?** Because bars are irregular during
 weekends/holidays. A 30-minute wall-clock limit means 30 real minutes,
@@ -363,7 +407,7 @@ hold positions through Friday night into Monday, which is never intended.
 | `trail_after_atr` | 1.0 | BE trigger before trail — proven profit first |
 | `trail_atr_mult` | 1.0 | Standard trail; tighter = more scratches |
 | `partial_atr_mult` | 1.5 | Half-way to TP — captures "some" before "all" |
-| `max_seconds_in_trade` | 1800 | 30 minutes — beyond that, thesis is stale |
+| `max_seconds_in_trade` | resolution-scaled | See table above |
 
 ---
 
@@ -461,6 +505,12 @@ change it and rerun walk-forward validation, the validation loses
 meaning — you have fit the threshold to the holdout. Pick a threshold
 *once* (0.60 is standard), commit to it, and let walk-forward tell you
 whether the model at that threshold is worth trading.
+
+**Never tune parameters to fix a failing model.** If AUC is 0.474, the
+model has no edge. Parameter tuning will move the noise around and might
+make one configuration look like a weak signal — that's p-hacking with a
+small search space. If there's no signal in the data, no amount of tuning
+finds one.
 
 ---
 

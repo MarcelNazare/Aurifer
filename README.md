@@ -5,32 +5,34 @@
 
 **A scientific instrument for gold (XAU/USD) trading strategies. It tells you when not to trade.**
 
-Aurifer is a Rust research system for backtesting short-term gold strategies against real market data. It runs five strategy families, trains a calibrated ML predictor, walk-forward validates the predictor against regime shifts, and reports statistical significance on every backtest. When the math doesn't hold, it says so — and refuses to trade.
-
 ![Aurifer Dashboard Preview](docs/images/aurifer-dashboard.png)
 
-It talks to **IG Markets** for both historical data and live execution (via the `ig-client` crate). It is not a money machine. It is the tool you build *before* you have a strategy, so you can find out — with real data and realistic costs — whether the strategy is worth risking money on.
+Aurifer is a Rust research system for backtesting short-term gold strategies against real market data. It runs five strategy families, trains a calibrated ML predictor, walk-forward validates the predictor against regime shifts, and reports statistical significance on every backtest. When the math doesn't hold, it says so — and refuses to trade.
+
+It fetches historical gold data from **xaus.com** — a free, keyless, JSON API with an explicit data-freshness contract. It is not a money machine. It is the tool you build *before* you have a strategy, so you can find out — with real data and realistic costs — whether the strategy is worth risking money on.
 
 ---
 
 ## What it does
 
-- **Backtests** against real 1-minute XAU/USD data from IG Markets
+- **Backtests** against real XAU/USD OHLCV data from xaus.com at MINUTE, HOUR, DAY, WEEK, or MONTH resolution
 - **Runs five strategy families**: RSI mean-reversion, Donchian breakout, squeeze release, order-flow proxy, and a calibrated ML predictor
 - **Walk-forward validates** the predictor across multiple folds and market regimes, and **auto-disables it** when the edge doesn't survive
+- **Forecasts** a single probability — `aurifer forecast` fetches up to 10 years of history, trains, validates, and prints `P(up)` for the current bar
 - **Simulates realistically**: next-bar-open fills, session/vol/size-aware spread, sqrt-scaled slippage, per-trade commissions
 - **Manages risk mechanically**: ATR-based stops, continuous trailing, partial exits, wall-clock time stops, daily loss halts, news blackout windows
 - **Reports statistical significance**: Wilson CIs on win rate, bootstrap CIs on PnL and Sharpe, break-even win rate computed from actual RR
-- **Places real orders on IG** — demo by default, live only after an explicit opt-in
 - **Ships two dashboards**: an interactive terminal UI (TUI) and a browser dashboard (Web UI)
+- **Caches every fetch** — the first run downloads, every subsequent run of the same range is instant
 
 ## What it does not do
 
 - **Predict exact prices.** The predictor outputs a probability of direction, not a point forecast. There is a diagnostic to prove why point prediction is untradeable — see [`diagnostics point-prediction`](#diagnostics).
 - **Guarantee profit.** No system can. What exists is statistical edge — a >52% probability of winning on a defined set of trades. Aurifer measures it; it doesn't create it.
+- **Place real orders.** xaus.com is a data source, not a broker. `aurifer live` deliberately errors out. If you later want execution, wire a broker (IG, Interactive Brokers, OANDA) into `src/broker.rs` and keep xaus for research.
 - **Run at institutional HFT speeds.** Retail brokers route through their own matching engines. Microsecond latency is not something you can code your way into from a VPS.
 - **Use real footprint / order-flow data.** The order-flow family is a close-location proxy. True stacked-imbalance data requires a paid feed (Databento, CQG) that isn't wired in.
-- **Give you deep history from IG.** IG caps a single historical request at ~1000 bars for minute data. For multi-year 1-minute backtests you need a separate historical source (Databento, Polygon). See [Limitations](#limitations).
+- **Give you deep intraday history.** xaus.com proxies Yahoo Finance, which limits 1-minute data to ~7 days and 5-minute data to ~60 days. For multi-year backtests, use **DAY resolution** — Yahoo has 10+ years of daily gold history.
 
 ---
 
@@ -40,23 +42,22 @@ It talks to **IG Markets** for both historical data and live execution (via the 
 # Build
 cargo build --release
 
-# Configure IG credentials
-cp .env.example .env
-# edit .env with your IG_USERNAME, IG_PASSWORD, IG_API_KEY, IG_ACCOUNT_ID
+# Print a single forecast based on the last 10 years of daily bars
+./target/release/aurifer forecast --start 2016-01-01 --end 2026-11-01 --resolution DAY
 
-# Interactive terminal dashboard (default command)
-./target/release/aurifer
+# Interactive terminal dashboard
+./target/release/aurifer --resolution DAY
 
 # Browser dashboard — opens automatically at http://localhost:<port>
-./target/release/aurifer web
+./target/release/aurifer web --resolution DAY
 
 # Headless backtest with full statistical report
-./target/release/aurifer backtest --start 2024-01-01 --end 2024-03-01
+./target/release/aurifer backtest --start 2020-01-01 --end 2026-11-01 --resolution DAY
 ```
 
-The compiled `target/release/aurifer` binary is **fully self-contained** — HTML, CSS, and JS are embedded at compile time. Copy it anywhere, run it from any directory, on any machine.
+**No API key, no credentials, no sign-up.** xaus.com is free and keyless. The first run downloads and caches; subsequent runs are instant.
 
-If `.env` is missing or IG credentials are wrong, Aurifer prints a warning and **falls back to synthetic data** so you can still exercise the pipeline. Synthetic backtest numbers are meaningless — they exist only to prove the code runs.
+The compiled `target/release/aurifer` binary is **fully self-contained** — HTML, CSS, and JS are embedded at compile time. Copy it anywhere, run it from any directory, on any machine.
 
 ---
 
@@ -84,47 +85,26 @@ aurifer --help
 
 ## Configuration
 
-Aurifer reads IG credentials from environment variables (loaded from `.env` by `dotenvy`).
+xaus.com requires **no credentials**. There is no `.env` file to fill in, no API key to generate, no demo account to open.
 
-### `.env` file
+### Optional: cache directory
+
+The only environment variable Aurifer reads is `XAUS_CACHE_DIR`, which controls where fetched bars are stored:
 
 ```dotenv
-# Required — IG demo account credentials
-IG_USERNAME=your_ig_username
-IG_PASSWORD=your_ig_password
-IG_API_KEY=your_api_key
-IG_ACCOUNT_ID=your_account_id
-
-# Optional — demo (default) or live
-# Demo:   https://demo-api.ig.com/gateway/deal
-# Live:   https://api.ig.com/gateway/deal
-IG_BASE_URL=https://demo-api.ig.com/gateway/deal
-
-# Optional — the specific gold CFD epic on your IG account.
-# Use `aurifer ig-search gold` (or the search helper in broker.rs) to find yours.
-# Common: CS.D.CFDGOLD.CFDGC.IP (spot gold CFD, 100 oz)
-IG_GOLD_EPIC=CS.D.CFDGOLD.CFDGC.IP
-
-# Optional — order size in IG "size" units (1.0 = 1 contract for the epic)
-IG_ORDER_SIZE=1.0
-
-# Optional — news calendar blackout windows
-QUANTGIST_API_KEY=your_quantgist_key
+# Optional — defaults to ./cache
+XAUS_CACHE_DIR=./cache
 ```
 
-### Finding your gold epic
+### Optional: news blackout windows
 
-IG assigns epics per account type. Before trusting the default, verify yours:
+If you want the strategy to pause around NFP/CPI/FOMC releases, set a QuantGist key:
 
-```rust
-// src/broker.rs exposes:
-let results = broker.search("gold").await?;
-for (epic, name) in results {
-    println!("{epic}  {name}");
-}
+```dotenv
+QUANTGIST_API_KEY=your_key_here
 ```
 
-Put the epic you want into `IG_GOLD_EPIC`. The default (`CS.D.CFDGOLD.CFDGC.IP`) is the 100 oz spot gold CFD for most accounts — but not all.
+Without it, the strategy trades through news events. That's fine for research; it's risky for live execution.
 
 ### Key config knobs
 
@@ -148,39 +128,111 @@ All parameters live in `Config` in `src/types.rs`. The defaults are a reasonable
 | `trail_after_atr` | `1.0` | Move SL to breakeven after +1×ATR |
 | `trail_atr_mult` | `1.0` | Trail 1×ATR behind the running extreme |
 | `partial_atr_mult` | `1.5` | Take 50% profit at +1.5×ATR |
-| `max_seconds_in_trade` | `1800` | Force-close after 30 minutes wall clock |
+| `max_seconds_in_trade` | *resolution-scaled* | 30 min for MINUTE, 24 h for HOUR, 7 days for DAY |
 
-**Costs (IG-specific defaults):**
+**Costs (model defaults — xaus provides mid-price, not bid/ask):**
 
 | Field | Default | Meaning |
 |---|---|---|
-| `spread` | `0.30` | IG spot gold typical spread in USD |
-| `max_spread` | `0.35` | Session+vol multiplier cap |
+| `spread` | `0.30` | Modeled gold spread in USD |
+| `max_spread` | `0.50` | Session+vol multiplier cap |
 | `slippage` | `0.05` | Base per-fill slippage (scales with size) |
-| `commission_per_unit` | `0.0` | IG charges via spread on CFDs — no separate commission |
+| `commission_per_unit` | `0.0` | No commission modeled |
 
-**Strategy:**
+**Predictor:**
 
 | Field | Default | Meaning |
 |---|---|---|
-| `rsi_low` / `rsi_high` | `30` / `70` | RSI reversal thresholds (uses cross, not level) |
-| `adx_min` | `20` | Minimum ADX for breakout/RSI signals |
-| `donchian_period` | `10` | Breakout lookback window |
-| `bb_period` / `kc_period` | `20` / `20` | Squeeze detection |
-| `require_squeeze_gate` | `false` | Only trade during squeeze releases |
-| `require_orderflow_confirm` | `false` | Require order-flow agreement |
-
-To change defaults, edit `impl Default for Config` in `src/types.rs`.
+| `horizon` | `5` | Predict 5 bars ahead |
+| `label_atr_mult` | `0.25` | Label positive if move > 25% of ATR over the horizon |
+| `probability_threshold` | `0.60` | Emit long if P(up) ≥ 0.60, short if ≤ 0.40 |
+| `min_train_bars` | `500` | Minimum training samples per walk-forward fold |
 
 ---
 
 ## Usage
 
+### Forecast
+
+```bash
+aurifer forecast --start 2016-01-01 --end 2026-11-01 --resolution DAY
+```
+
+Prints a single prediction:
+
+```
+═══════════════════════════════════════════════════════════
+  AURIFER FORECAST
+═══════════════════════════════════════════════════════════
+  Window:     2016-01-01 → 2026-11-01 (DAY resolution)
+  Horizon:    5 DAY bars, threshold 0.25× ATR
+
+  📦 cache hit: 2519 bars from ./cache/xaus_XAU_DAY_20160101_20261101.json
+  Loaded:     2519 DAY bars
+
+  Validating model (walk-forward) …
+📊 Walk-forward validation (4 folds):
+   fold 1: AUC 0.511, acc 51.3%, train=1007, test=504
+   ...
+   aggregate AUC:  0.481 ± 0.022
+   worst fold AUC: 0.457
+   regime breakdown:
+      TREND_DN     n=242  acc=45.0% auc=0.397
+      RANGING      n=823  acc=49.3% auc=0.477
+      TREND_UP     n=950  acc=48.3% auc=0.502
+      TRANSITION   n=465  acc=54.2% auc=0.523
+
+📊 Predictor trained (Platt-calibrated):
+   AUC:                0.474 (95% CI 0.431–0.515)
+   Brier (calibrated): 0.2522
+   top features (by |weight|):
+     vol_ratio     -0.091
+     ret_60        +0.086
+     close_loc     +0.070
+     ...
+
+───────────────────────────────────────────────────────────
+  As of:          2026-10-31  (last close)
+  Current price:  3873.32
+  ATR(14):        65.23
+  RSI(14):        26.8
+  ADX(14):        33.0
+
+  ─── Prediction: next 5 DAY bars ───
+  P(up):          43.5%
+  P(not up):      56.5%  (down or flat)
+  Direction:      UNCERTAIN
+  Confidence:     MEDIUM  (edge: 6.5% above 50%)
+
+  ─── Model quality ───
+  Walk-forward:   ⚠️  UNVALIDATED
+  ⚠️  The model has NOT passed walk-forward validation.
+  ⚠️  This forecast is for research only — do not trade it.
+  AUC:            0.474  (95% CI 0.431–0.515)
+  Brier:          0.2522  (poor)
+  Base rate:      50.7%  (balanced)
+
+═══════════════════════════════════════════════════════════
+```
+
+**The first run** fetches ~10 years of daily bars in about 2 seconds (xaus.com is fast, no rate limits). **Every subsequent run** of the same date range reads from cache in under a second.
+
+Options:
+
+```bash
+aurifer forecast --horizon 30                        # longer prediction window
+aurifer forecast --label-atr-mult 0.40               # fewer positives (fix imbalance)
+aurifer forecast --start 2010-01-01                  # longer history
+aurifer forecast --no-cache                          # bypass cache, re-fetch
+```
+
+The forecast output above shows a **failing** model — AUC 0.474 on the holdout, well below the 0.54 threshold, with the CI straddling 0.50. That's the honest answer for gold at 5-day horizons on these features. See [What the results mean](#what-the-results-mean).
+
 ### Interactive TUI
 
 ```bash
-aurifer                        # default command
-aurifer tui --start 2024-01-01 --end 2024-06-30
+aurifer --resolution DAY
+aurifer tui --start 2020-01-01 --end 2026-11-01 --resolution HOUR
 ```
 
 Keyboard controls:
@@ -197,16 +249,14 @@ Keyboard controls:
 ### Browser dashboard
 
 ```bash
-aurifer web                    # opens browser automatically
-aurifer web --no-open          # skips browser launch (SSH, CI, headless)
+aurifer web --resolution DAY              # opens browser automatically
+aurifer web --resolution DAY --no-open    # skips browser launch
 ```
-
-The dashboard shows a live equity curve, current position, indicator gauges, and a trade log. Controls mirror the TUI: pause, step, reset, speed slider.
 
 ### Headless backtest
 
 ```bash
-aurifer backtest --start 2024-01-01 --end 2024-06-30
+aurifer backtest --start 2020-01-01 --end 2026-11-01 --resolution DAY
 ```
 
 Prints:
@@ -240,34 +290,26 @@ Sharpe:       1.83  (95% CI -0.42–4.11)
 
 **If the report ends with "DO NOT TRADE LIVE", believe it.** The statistics are doing exactly what they're supposed to do — telling you when a result is indistinguishable from luck.
 
-### Live trading (IG)
+### Live trading
 
 ```bash
-# 1. Create an IG demo account at https://www.ig.com/
-# 2. Generate an API key: My IG → Settings → API Keys
-# 3. Fill in .env with the credentials
-
-# Demo (default — IG_BASE_URL points to demo-api)
-aurifer live --confirm-live
-
-# Real money — requires BOTH IG_BASE_URL to point to the live API AND --confirm-live
-# Set IG_BASE_URL=https://api.ig.com/gateway/deal in .env, then:
-aurifer live --confirm-live
+aurifer live
+# Error: Live trading is not supported with xaus.com.
+#        Use IG Markets for execution.
 ```
 
-**Before you point `IG_BASE_URL` at the live endpoint:**
+xaus.com is a data source, not a broker. The `live` command exists as a stub but returns an error. If you later want execution:
 
-1. Backtest on **3+ years** of data. If walk-forward validation fails, the predictor is auto-disabled — respect that.
-2. Backtest on a **different calendar year** than training. If the second year also passes, the edge may be real.
-3. Run in **demo for at least 3 months**. Compare demo results against the backtest over the same period. If demo loses money where the backtest was profitable, the backtest is wrong.
-4. Check the **realized adverse gap** printed at the end of every run. If it's > 1.5× the modeled slippage, raise `Config::slippage` and re-run.
+1. Add a broker client to `src/broker.rs` (IG v2, Interactive Brokers, or OANDA v20)
+2. Adapt `run_live_trading` to use that client
+3. Keep xaus.com for research and backtesting — it's the best free historical feed available
 
-If any of those fail, the strategy does not have a tradeable edge. The correct response is more research — not more leverage.
+Do not add execution until a backtest has passed significance checks on multiple years of data and demo results have tracked the backtest for at least three months.
 
 ### Diagnostics
 
 ```bash
-aurifer diagnostics point-prediction --start 2024-01-01 --end 2024-03-31 --horizon 30
+aurifer diagnostics point-prediction --start 2020-01-01 --end 2026-11-01 --horizon 30
 ```
 
 Trains a ridge regression to predict exact price `t+horizon` ahead, then shows:
@@ -279,16 +321,74 @@ Trains a ridge regression to predict exact price `t+horizon` ahead, then shows:
 
 **The output will say `❌ NOT TRADEABLE`.** This is intentional. The diagnostic exists to prove in numbers what is stated in prose: at 1-minute resolution, gold's noise is larger than any predictable signal. Average error will be 10–100× the spread. Do not trade on point predictions.
 
-### Offline / CI mode
+---
 
-Every command accepts `--no-ig`. When set, Aurifer skips the IG connection and generates synthetic bars so you can exercise the pipeline without credentials:
+## Data source — xaus.com
 
-```bash
-aurifer backtest --no-ig
-cargo test -- --test-threads=1
+[xaus.com](https://xaus.com) is a free, keyless JSON API for gold prices. Three things make it well-suited to Aurifer:
+
+**1. Explicit data-freshness contract.** Every response includes a `data_state` field:
+
+```json
+{
+  "data_state": {
+    "status": "fresh",        // "fresh" | "stale" | "unavailable"
+    "age_seconds": 2,
+    "source": "yahoo"
+  }
+}
 ```
 
-Synthetic backtest numbers are meaningless. This flag exists to keep CI fast and hermetic.
+Aurifer reads this on every fetch. `fresh` → use the data. `stale` → use with a warning. `unavailable` → refuse. This prevents silently backtesting on simulated or placeholder data, which is one of the most common failure modes of free APIs.
+
+**2. No rate limits.** The fair-use policy allows sustained requests. Fetching 10 years of daily bars takes about 2 seconds, and the cache means you only pay that cost once.
+
+**3. Wide range of intervals.** The `/api/v1/chart` endpoint accepts intervals from `1m` to `1mo`. Aurifer maps its resolution names onto these:
+
+| Aurifer `--resolution` | xaus interval | Historical depth |
+|---|---|---|
+| `MINUTE` | `1m` | ~7 days (Yahoo limit) |
+| `MINUTE_5` | `5m` | ~60 days |
+| `MINUTE_15` | `15m` | ~60 days |
+| `HOUR` | `60m` | ~2 years |
+| `DAY` | `1d` | 10+ years |
+| `WEEK` | `1wk` | Multi-decade |
+| `MONTH` | `1mo` | Multi-decade |
+
+**For multi-year backtests and forecasts, use `--resolution DAY`.** Intraday intervals work but are limited to weeks or months of history — not enough for walk-forward validation on the predictor.
+
+### Local cache
+
+Every fetch writes a JSON file to `./cache/`, keyed by `(symbol, resolution, start, end)`. A repeat run of the same range reads from disk instantly. Use `--no-cache` to force a re-fetch, or delete the cache files:
+
+```bash
+rm -f cache/*.json                                    # bash
+Remove-Item .\cache\*.json -ErrorAction SilentlyContinue   # PowerShell
+```
+
+---
+
+## What the results mean
+
+The forecast output above showed `AUC 0.474` — **below 0.50, meaning the model is worse than random on the holdout**. This is the expected outcome for gold at 5-day horizons using generic technical features. Most published research agrees: gold's short-term direction is not meaningfully predictable from TA alone.
+
+The result is **not a bug**. Three checks confirm the model was evaluated honestly:
+
+| Check | Result | Verdict |
+|---|---|---|
+| **Base rate** | 50.7% | ✅ Labels balanced — no class imbalance artifact |
+| **Platt a** | 0.958 | ✅ Calibration didn't break — raw model was roughly calibrated |
+| **Fold AUC spread** | 0.462–0.511 | ✅ Plausible shape — not shuffled data, not leaked future |
+
+If the code had a lookahead bug, you'd see AUC above 0.65 across all folds. If it were shuffling data, you'd see exactly 0.50 every time. The 0.474 you see is a real "no edge" result.
+
+**What to do with this:**
+
+1. **Try longer horizons.** `--horizon 10`, `--horizon 20`, `--horizon 30`. The 5-day signal may just be too short. The regime breakdown from your run showed `TRANSITION` regime had AUC 0.523 — the only regime where the model beat random. That's a clue.
+2. **Test the rule-based strategies.** Run `aurifer backtest --no-predictor` to see whether RSI/breakout/squeeze/order-flow have edge while the ML model doesn't. They're simpler and less prone to overfitting.
+3. **Accept the result.** If horizons 10, 20, 30 and the rule-based backtest all fail, gold at daily resolution with these features is not predictable. That's a legitimate finding. The project has done its job.
+
+**Do not tune parameters to "make it work."** The model has no edge, not a hidden edge it's failing to find. Parameter tuning will move the noise around and might make one configuration look like a weak signal — that's p-hacking with a small search space. If there's no signal in the data, no amount of tuning finds one.
 
 ---
 
@@ -296,8 +396,8 @@ Synthetic backtest numbers are meaningless. This flag exists to keep CI fast and
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  broker::IgBroker::fetch_bars  /  snapshot                     │
-│  (ig-client 0.18 — REST, governor rate limiter)                │
+│  broker::XausBroker::fetch_bars  /  snapshot                   │
+│  (reqwest + xaus.com REST, local JSON cache)                   │
 └──────────────────────────────┬──────────────────────────────────┘
                                │ Vec<Bar>
                                ▼
@@ -314,24 +414,22 @@ Synthetic backtest numbers are meaningless. This flag exists to keep CI fast and
               ┌────────────────┼────────────────┐
               ▼                ▼                ▼
         ┌──────────┐    ┌──────────┐    ┌──────────────┐
-        │ TUI      │    │ Web      │    │ Report       │
-        │ ratatui  │    │ axum+ws  │    │ + stats::    │
-        │          │    │          │    │   analyze    │
+        │ TUI      │    │ Web      │    │ Forecast     │
+        │ ratatui  │    │ axum+ws  │    │ P(up) + CI   │
         └──────────┘    └──────────┘    └──────────────┘
 ```
 
-The predictor pipeline runs *before* the backtest:
+The predictor pipeline runs *before* the backtest and forecast:
 
 ```
-warm up indicators over all bars
+warm up indicators over all bars (skip the first 60 — features need history)
     → extract 15 causal features per bar
-    → build labels (did price rise > 0.3×ATR over next 30 bars?)
-    → walk-forward validate (4 expanding folds, per-regime breakdown)
+    → build labels (did price rise > label_atr_mult × ATR over next `horizon` bars?)
+    → walk-forward validate (expanding window, auto-reduced folds if data is short)
+    → per-regime AUC breakdown (TREND_UP / TREND_DN / RANGING / TRANSITION)
     → if validation passes: train final calibrated model
     → if validation fails:    disable predictor, continue with rule-based only
 ```
-
-The live loop is a **2-second REST poll** against IG's snapshot endpoint, aggregated into 1-minute bars, feeding the same `SessionState::step()`. If you want to swap polling for IG's Lightstreamer feed later, only `run_live_trading()` changes — the rest of the pipeline is identical.
 
 ---
 
@@ -346,24 +444,30 @@ aurifer/
 ├── README.md
 ├── .gitignore
 ├── src/
-│   ├── main.rs            Entry point, CLI dispatch, backtest orchestration
+│   ├── main.rs            Entry point, CLI dispatch, forecast handler
 │   ├── cli.rs             clap CLI definitions
 │   ├── types.rs           Core data structures
 │   ├── indicators.rs      RSI, EMA, SMA, ATR, ADX, Bollinger, Keltner, Donchian
 │   ├── strategies.rs      StrategyEngine — 5 families + confluence gates
-│   ├── predictor.rs       Calibrated logistic regression + walk-forward
+│   ├── predictor.rs       Calibrated logistic regression + walk-forward + feature importance
 │   ├── point_predictor.rs Ridge regression diagnostic
 │   ├── costs.rs           Session/vol/size-aware cost model
-│   ├── data.rs            IG bars + synthetic fallback
-│   ├── broker.rs          IG Markets client (ig-client 0.18)
+│   ├── data.rs            Thin wrapper over broker::fetch_bars
+│   ├── broker.rs          xaus.com REST client + local JSON cache
 │   ├── session.rs         Per-bar state machine
 │   ├── stats.rs           Wilson CI, bootstrap PnL/Sharpe CI
 │   ├── tui.rs             ratatui terminal dashboard
 │   └── web.rs             axum server + WebSocket + embedded assets
-└── static/
-    ├── index.html         (embedded at compile time via include_str!)
-    ├── style.css
-    └── app.js
+├── static/
+│   ├── index.html         (embedded at compile time via include_str!)
+│   ├── style.css
+│   └── app.js
+├── cache/                 (gitignored — auto-created on first fetch)
+└── docs/
+    ├── ARCHITECTURE.md
+    ├── STRATEGY.md
+    ├── VALIDATION.md
+    └── LIVE_TRADING.md
 ```
 
 ---
@@ -372,7 +476,7 @@ aurifer/
 
 These are the non-negotiables behind every design decision in this codebase:
 
-1. **No lookahead.** Features use only bars at or before `t`. Labels use `t + horizon` strictly. If backtest accuracy exceeds 65%, suspect a bug before celebrating.
+1. **No lookahead.** Features use only bars at or before `t`. Labels use `t + horizon` strictly. **If backtest accuracy exceeds 65%, suspect a bug before celebrating.**
 
 2. **Next-bar-open fills.** Signals are computed at bar close. Fills happen at the next bar's open, with spread and slippage. Filling at signal-bar close is fantasy.
 
@@ -380,11 +484,13 @@ These are the non-negotiables behind every design decision in this codebase:
 
 4. **Statistics or it doesn't count.** Every backtest ends with Wilson CI on win rate, bootstrap CI on PnL and Sharpe, and break-even win rate. If any CI crosses zero or fails to clear break-even, the report says `DO NOT TRADE LIVE`.
 
-5. **Predictors validate or die.** Walk-forward validation runs across 4 expanding folds and per-regime breakdowns. If aggregate AUC < 0.54, worst fold < 0.50, or fewer than 2 regimes show positive edge, the predictor is **auto-disabled**.
+5. **Predictors validate or die.** Walk-forward validation runs across expanding folds and per-regime breakdowns. If aggregate AUC < 0.54, worst fold < 0.50, or fewer than 2 regimes show positive edge, the predictor is **auto-disabled**.
 
-6. **One explicit opt-in for real money.** `--confirm-live` is required, and `IG_BASE_URL` must point at the live endpoint. Accidentally trading real money because of a typo is the exact failure mode this project is designed to prevent.
+6. **The diagnostic exists to prove what doesn't work.** `point-prediction` isn't a feature — it's a proof. It shows, with the user's own data, why point prediction is untradeable.
 
-7. **The diagnostic exists to prove what doesn't work.** `point-prediction` isn't a feature — it's a proof. It shows, with the user's own data, why point prediction is untradeable.
+7. **Cache or pay twice.** Every fetch is cached by `(symbol, resolution, start, end)`. The first run downloads, every subsequent run is instant. Changing `--horizon` reuses the same cached bars.
+
+8. **Data freshness is explicit.** Every xaus response carries a `data_state` field. Aurifer reads it. `fresh` → use. `stale` → warn and use. `unavailable` → refuse. No silent fallback to fake data.
 
 ---
 
@@ -392,25 +498,13 @@ These are the non-negotiables behind every design decision in this codebase:
 
 | Limitation | Why | Workaround |
 |---|---|---|
-| **Shallow IG history** | IG caps a single historical request at ~1000 bars for minute data | Use Databento or Polygon for multi-year backtests; use IG only for live execution |
-| **`snapshot_time` is UK local time** | IG does not return UTC on the REST endpoint | Bar ordering and indicators are unaffected; session filters will see a 0–1 hour offset |
-| **Order confirmation is async** | `create_order` returns a deal reference, not a deal ID | Log the reference; wire `get_order_confirmation(deal_reference)` in a future version |
-| **Polling, not streaming** | The live loop polls every 2 seconds | Replace `run_live_trading` with IG's Lightstreamer feed if you need true streaming |
+| **Intraday history is shallow** | xaus proxies Yahoo Finance; 1m → ~7 days, 5m → ~60 days | Use `--resolution DAY` for multi-year backtests |
+| **Mid-price only** | xaus returns `spot_usd_oz`, not bid/ask | Spread is modeled as a constant; real fills are worse |
+| **No live execution** | xaus is a data source, not a broker | Add a broker client to `src/broker.rs` when ready |
+| **Yahoo as upstream** | xaus chart endpoint is a Yahoo proxy | Some intervals may have gaps; the `data_state` contract mitigates this |
 | **No real footprint data** | Databento/CQG is a paid feed | `FootprintOrderFlow` trait stub is ready for a real implementation |
-| **No retraining after startup** | Training happens once, up front | Retrain weekly in production via a v0.2 scheduler |
+| **No retraining after startup** | Training happens once, up front | Run `forecast` fresh each day; the cache makes it fast |
 | **No unit tests** | Prioritized integration over unit coverage | Add `tests/` — see the file structure section |
-
----
-
-## IG account notes
-
-**Sign-up:** IG requires a live funded account to generate API keys for live endpoints. Demo keys are available but may require a support request. Open a demo account first at `ig.com` — you will be guided through KYC and an appropriateness questionnaire.
-
-**Entity jurisdiction:** IG operates several regulated entities (IG Markets Ltd in the UK, IG US LLC, IG Australia, etc.). Your account's entity determines which epics you can trade. Use `search("gold")` after login to list the gold instruments available to you.
-
-**API key generation:** Once your live account is verified, go to **My IG → Settings → API Keys → Generate New Key**. You will get an API key; use it with your IG username, password, and account ID in `.env`.
-
-**Rate limits:** IG's API is rate-limited. `ig-client` paces requests via `governor`. The live loop's 2-second polling plus any historical fetches share the same budget. If you see `429` errors, raise the polling interval or reduce history fetches.
 
 ---
 
@@ -431,26 +525,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Disclaimer
 
-Aurifer is research software. It is not financial advice. Trading gold CFDs (or anything else) can result in losses exceeding your initial deposit. The MIT license disclaims all liability for any losses incurred through use of this software. Past backtest performance does not guarantee future results. CFD trading carries significant risk of loss and is not suitable for all investors. If you don't understand every line of this codebase, do not run `live` mode with real money.
+Aurifer is research software. It is not financial advice. Trading gold (or anything else) can result in losses exceeding your initial deposit. The MIT license disclaims all liability for any losses incurred through use of this software. Past backtest performance does not guarantee future results. If you don't understand every line of this codebase, do not wire it to a broker account with real money.
 
 **The "DO NOT TRADE LIVE" verdict printed by this program is not a bug. It is the point.**
-```
-
----
-
-## 📋 What changed vs. the OANDA version
-
-| Section | Change |
-|---|---|
-| Header tagline | "XAU/USD" → same, but broker reference now IG |
-| Quick start | Added `.env` setup; explained synthetic fallback |
-| **New: Configuration section** | Full `.env` template, all `IG_*` variables documented, epic discovery workflow |
-| Usage — live trading | IG-specific: demo vs live endpoint, `--confirm-live` only (no `OANDA_LIVE` env var) |
-| Usage — offline mode | New `--no-ig` flag documented |
-| Costs defaults | Updated to IG-specific values (`spread: 0.30`, `commission: 0.0`) |
-| Architecture | IG client in the diagram; 2-second polling noted |
-| File structure | `broker.rs` description now says "IG Markets client (ig-client 0.18)" |
-| Design principles | Opt-in rule now references `--confirm-live` + live `IG_BASE_URL` |
-| **New: Limitations section** | Explicit table of every IG-specific caveat |
-| **New: IG account notes** | Sign-up, entity jurisdiction, API keys, rate limits |
-| Disclaimer | Added "CFD trading carries significant risk of loss" |

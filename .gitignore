@@ -1,6 +1,128 @@
-/target
+# ─────────────────────────────────────────────────────────────────────
+#  Aurifer .gitignore
+# ─────────────────────────────────────────────────────────────────────
+
+# ── Rust build artifacts ────────────────────────────────────────────
+/target/
 **/*.rs.bk
 *.pdb
+*.rlib
+*.rmeta
+*.d
+
+# ── Cargo backups ───────────────────────────────────────────────────
+# Cargo.lock is committed (binary crate — pin exact dependency versions)
+# Do not add Cargo.lock here.
+
+# ── Local data cache ────────────────────────────────────────────────
+# xaus.com fetch cache. Each run writes JSON files here. Safe to delete
+# — the next run re-fetches (fast) or reads from the IG cache if you
+# still have one.
+/cache/
+
+# ── Environment files ───────────────────────────────────────────────
+# xaus.com requires no credentials, but .env may contain:
+#   - XAUS_CACHE_DIR (overrides default ./cache)
+#   - QUANTGIST_API_KEY (optional news blackout windows)
+#   - IG_*, OANDA_*, IBKR_* (if you wire a broker later)
+# Never commit secrets.
 .env
 .env.local
+.env.*.local
+
+# Keep the template
+!.env.example
+
+# ── IDE and editor files ────────────────────────────────────────────
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+
+# ── OS-specific ─────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Logs and reports ────────────────────────────────────────────────
+*.log
+logs/
+backtests/
+reports/
+*.csv
+*.parquet
+# (Remove the *.csv line if you keep curated historical data in the repo)
+
+# ── Documentation build output ──────────────────────────────────────
+/docs/book/
+/book/
+
+# ── Test and coverage artifacts ─────────────────────────────────────
+/tarpaulin-report.html
+/cobertura.xml
+/lcov.info
+*.profraw
+*.profdata
+
+# ── Benchmark output ────────────────────────────────────────────────
+/criterion/
+
+# ── Binary releases (if you stage them locally) ─────────────────────
+/releases/
+*.exe
+*.msi
+*.dmg
+*.app
+*.deb
+*.rpm
+*.snap
+*.AppImage
+
+# ── Temporary files ─────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+tmp/
+temp/
+
+# ── Python (if you add any scripts) ─────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# ── Node (if you add tooling around static/) ────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ── Jupyter (if you add analysis notebooks) ─────────────────────────
+.ipynb_checkpoints/
+
+# ── Secrets and key material (belt and braces) ──────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/

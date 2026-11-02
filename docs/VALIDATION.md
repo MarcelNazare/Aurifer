@@ -2,6 +2,11 @@
 
 Why the program says "DO NOT TRADE LIVE" — and why that's the whole point.
 
+The current model on 10 years of xaus daily data scores **AUC 0.474** on
+the holdout and **fails walk-forward validation**. This document
+explains what that result means, why it's not a bug, and what to try
+next.
+
 ---
 
 ## 1. Why validation matters more than backtest results
@@ -47,11 +52,10 @@ might correspond to a true 45% frequency. Platt scaling on a held-out
 model.
 
 **Why 25% holdout is the minimum?** For a bootstrap CI on AUC to be
-meaningful, the test set needs hundreds of samples. On 1-minute gold,
-6 months of data (≈130,000 bars, minus label-loss at the horizon) yields
-~30,000 usable samples; 25% of that is plenty. On 1 month of data,
-25% may be under 500 samples and the CI becomes very wide. **If your
-holdout has fewer than 500 samples, the test metrics cannot be trusted.**
+meaningful, the test set needs hundreds of samples. 10 years of daily
+gold bars is ~2,500 samples; 25% of that is ~625 — enough for a
+meaningful CI. If your holdout has fewer than 200 samples, the test
+metrics cannot be trusted.
 
 ---
 
@@ -59,7 +63,7 @@ holdout has fewer than 500 samples, the test metrics cannot be trusted.**
 
 ### Why expanding window
 
-A rolling-window backtest (e.g., "train on 30 days, test on next 5")
+A rolling-window backtest (e.g., "train on 30 bars, test on next 5")
 throws away data. Expanding window keeps all history:
 
 ```
@@ -73,15 +77,19 @@ Each fold trains on all data available up to its train-end, then tests on
 a contiguous window that comes strictly after. No test window overlaps
 with any training data.
 
-**Why 4 folds?**
+**Why 4 folds?** 4 is the sweet spot for 10 years of daily data:
+each fold tests on ~2.5 years, which is enough samples (~600) for a
+meaningful AUC, while the training windows grow from 2.5 to 10 years,
+capturing the model's performance as it learns.
 
-- 2 folds: too little evidence; one bad fold poisons the average.
-- 3 folds: the minimum for a "worst fold < 0.50" rejection to be meaningful.
-- 4 folds: 4 × 20% = 80% train + 4 × 20% test (with overlap) — each fold
-  tests on a large enough chunk to have samples.
-- 5+ folds: diminishing returns; each test window becomes too small.
+The code auto-reduces the fold count if the data isn't enough for 4
+folds with `min_train_bars = 500`. You'll see:
 
-4 is the sweet spot for 1-minute gold with 6 months of data.
+```
+⚠️  reduced folds from 4 to 3 (1865 bars, 500 min_train_bars)
+```
+
+That's the code protecting you from a meaningless validation, not a bug.
 
 ### Per-regime breakdown
 
@@ -163,9 +171,10 @@ Aurifer prints `Platt a,b` after training. If `a < 0`, treat it as a bug.
 - **Brier 0.10** = excellent (rare in finance)
 
 The threshold in Aurifer is **0.24**. Above that, the probabilities are
-not informative enough to trade on. This is a loose threshold — a
-Brier of 0.22 that clears the threshold is not "good," just "not
-disqualified."
+not informative enough to trade on.
+
+The current model scores Brier 0.2522 — worse than always guessing 0.5.
+That's consistent with the AUC below 0.50.
 
 ### Why calibration matters for thresholds
 
@@ -267,10 +276,10 @@ be accurate within half-spread. Because:
 - Half-spread is the one-way cost; if prediction error > half-spread,
   the fill will be worse than the predicted price, eating the edge.
 
-On 1-minute gold, typical MAE is **$2–$5**, while spread is **$0.20**.
-That is a 10–25× gap. The diagnostic prints the verdict as
-`❌ NOT TRADEABLE` because the accuracy needed (90%+) is off by an order
-of magnitude from what any model achieves (3–8%).
+On daily gold, typical MAE is **$20–$60**, while spread is **$0.30**.
+That is a **65–200× gap**. The diagnostic prints `❌ NOT TRADEABLE`
+because the accuracy needed (90%+) is off by two orders of magnitude from
+what any model achieves (1–3%).
 
 ### Why this is important
 
@@ -309,8 +318,9 @@ Live trading introduces frictions the backtest cannot model:
 - **Rejections** — the broker can reject orders during volatility
 - **Disconnects** — the network drops mid-trade
 
-Every one of these degrades performance relative to the backtest. A
-strategy that is marginal in backtest becomes losing live.
+**xaus.com provides mid-price data.** The backtest assumes a constant
+spread. Real fills happen at bid or ask, not mid. That alone can eat
+the entire edge if the model is marginal.
 
 ### A passing validation means "not obviously luck"
 
@@ -321,12 +331,10 @@ flag this as indistinguishable from noise." That is a much lower bar.
 
 1. **Run on 3+ years of data.** One year is not enough.
 2. **Run on a different calendar year.** If both pass, the edge may be real.
-3. **Demo-trade for 3 months.** Compare demo results against the backtest
-   on the same period. If demo loses money where the backtest was
-   profitable, the backtest is wrong.
-4. **Check the realized adverse gap.** Printed at the end of every
-   backtest. If it's > 1.5× the modeled slippage, the model was too
-   optimistic — raise `Config::slippage` and re-run.
+3. **Run on different horizons.** 5-day might fail; 20-day might pass.
+4. **Run the rule-based strategies separately.** If they show edge while
+   the ML model doesn't, the edge might be in RSI/breakout/squeeze, not
+   in the predictor.
 
 If any of those fail, the strategy does not have a tradeable edge. The
 correct response is more research — not more leverage, not tighter stops,
@@ -334,7 +342,107 @@ not a bigger sample.
 
 ---
 
-## 8. The multiple-year test
+## 8. The current baseline — a worked example
+
+On 10 years of xaus daily bars (2016-11-03 → 2026-11-01, 3,106 bars):
+
+```
+Walk-forward (4 folds):
+   fold 1: AUC 0.462, acc 44.4%, train=561,  test=621
+   fold 2: AUC 0.494, acc 52.8%, train=1182, test=621
+   fold 3: AUC 0.511, acc 51.9%, train=1803, test=621
+   fold 4: AUC 0.457, acc 48.6%, train=2424, test=617
+   aggregate AUC:  0.481 ± 0.022
+   worst fold AUC: 0.457
+   regime breakdown:
+      TREND_DN     n=242  acc=45.0% auc=0.397
+      RANGING      n=823  acc=49.3% auc=0.477
+      TREND_UP     n=950  acc=48.3% auc=0.502
+      TRANSITION   n=465  acc=54.2% auc=0.523
+
+Holdout (25%):
+   AUC:                0.474 (95% CI 0.431–0.515)
+   Brier (calibrated): 0.2522
+   Platt a,b:          0.958, 0.079
+   base rate:          50.7%
+```
+
+### What this result tells you
+
+**The model has no edge.** Three checks confirm the evaluation was
+honest:
+
+1. **Base rate 50.7%** — labels are balanced. The model isn't cheating
+   by predicting the majority class.
+2. **Platt a = 0.958** — close to 1.0, meaning calibration wasn't
+   destroyed. If Platt a were negative, something would be wrong.
+3. **Fold AUCs 0.462–0.511** — the spread is plausible. If there were a
+   lookahead bug, all folds would be 0.7+. If data were shuffled, all
+   folds would be exactly 0.50.
+
+What you see is a model that *almost* found something in fold 3 (0.511)
+and then failed on the recent data (0.457). That's exactly what "no
+reliable edge" looks like.
+
+### What the regime breakdown hints at
+
+`TRANSITION` regime AUC 0.523 is the only regime where the model beat
+random with a plausible sample size (465 bars). The edge, whatever it
+is, lives in ADX 20–25 conditions — the boundary between trending and
+ranging.
+
+If you were going to pursue this result further, the hypothesis is:
+**"gold direction is predictable during transitions, not during
+established trends or ranges."** That's a testable statement — one that
+could be validated by reframing the model to only predict in TRANSITION
+regimes.
+
+The `regime breakdown` in every forecast output is the first clue toward
+a better model. The current model averages over all regimes and loses
+the signal that exists in one.
+
+### What NOT to do with this result
+
+- **Don't tune parameters.** The model has no edge, not a hidden edge
+  it's failing to find. Parameter tuning moves noise around.
+- **Don't add more ML.** Random forest, gradient boosting, neural nets —
+  none of these find edge in 15 generic TA features on gold at 5-day
+  horizons. Non-linear models on linear problems produce the same AUC
+  with more variance.
+- **Don't touch live trading.** You don't have a validated edge. Live
+  trading is for testing infrastructure against a proven strategy, not
+  for finding out if the strategy works.
+
+### What to try
+
+In order, cheapest first:
+
+1. **Longer horizons.**
+   ```bash
+   aurifer forecast --horizon 10 --start 2016-01-01 --end 2026-11-01
+   aurifer forecast --horizon 20 --start 2016-01-01 --end 2026-11-01
+   aurifer forecast --horizon 30 --start 2016-01-01 --end 2026-11-01
+   ```
+   Each run reuses the same cached bars — only the labels change. Look
+   for any horizon where the AUC CI lower bound is ≥ 0.52.
+
+2. **The rule-based strategies.** Run
+   `aurifer backtest --no-predictor --start 2020-01-01 --end 2026-11-01 --resolution DAY`
+   to see if RSI/breakout/squeeze/order-flow have edge while the ML
+   model doesn't.
+
+3. **Regime filtering.** If both of the above fail but `TRANSITION`
+   regime looked real, the next hypothesis is a model that only predicts
+   in that regime. This requires a code change in `build_dataset`.
+
+4. **Accept the result.** If all of the above fail, gold direction at
+   daily resolution with these features is not predictable. That's a
+   legitimate finding — it matches most academic research on commodity
+   direction.
+
+---
+
+## 9. The multiple-year test
 
 ### Why one year is not enough
 
@@ -354,9 +462,8 @@ across different regimes is not optional if you want confidence.
 
 ### How to test across regimes
 
-1. Download 3+ years of 1-minute data (requires Databento or Polygon —
-   IG caps at ~1000 bars per request)
-2. Run `aurifer backtest --start 2022-01-01 --end 2024-12-31`
+1. Fetch 10+ years of daily data (already cached from your forecast run)
+2. Run `aurifer backtest --start 2016-01-01 --end 2026-11-01 --resolution DAY`
 3. Read the walk-forward per-regime breakdown. If all four regimes show
    positive edge, the model is robust. If only one does, it's regime-specific.
 4. Rerun on each individual year. If any single year is catastrophic

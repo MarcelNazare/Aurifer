@@ -2,21 +2,39 @@
 
 The mental model you need to change Aurifer safely.
 
+Aurifer fetches XAU/USD data from **xaus.com** — a free, keyless JSON
+API. Everything downstream of the `Bar` type is data-source-agnostic. If
+you swap xaus for a different feed, only `src/broker.rs` changes.
+
 ---
 
 ## 1. The pipeline
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  broker::IgBroker                                                  │
-│  ├─ fetch_bars("MINUTE", N)  → Vec<Bar>   (historical)            │
-│  └─ snapshot()               → (bid, offer)  (live)                │
+│  broker::XausBroker                                                │
+│  ├─ fetch_bars("DAY", start, end)  → Vec<Bar>   (historical)      │
+│  └─ snapshot()                     → f64        (live price)      │
+│                                                                    │
+│  Endpoints used:                                                   │
+│    GET /api/v1/chart?symbol=xau&range={range}&interval={interval}  │
+│    GET /api/v1/spot?compact=1                                      │
+│                                                                    │
+│  Every response carries a `data_state` field:                      │
+│    status: "fresh" | "stale" | "unavailable"                       │
+│  Aurifer reads it and refuses to use "unavailable" data.           │
+└────────────────────────────────┬───────────────────────────────────┘
+                                 │
+                                 ▼
+┌────────────────────────────────────────────────────────────────────┐
+│  Local JSON cache (./cache/, keyed by symbol+resolution+start+end) │
+│  First run: fetch + write. Every subsequent run: read from disk.   │
 └────────────────────────────────┬───────────────────────────────────┘
                                  │
                                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  Phase 1 — warm-up                                                 │
-│  SessionState::step() over every historical bar                    │
+│  SessionState::step() over every bar                               │
 │  → produces Vec<Eval> (one per bar)                                │
 │  → primes RSI, ADX, ATR, EMAs, Bollinger, Keltner, Donchian        │
 └────────────────────────────────┬───────────────────────────────────┘
@@ -24,25 +42,25 @@ The mental model you need to change Aurifer safely.
                                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  Phase 2 — predictor training (optional)                           │
-│  ├─ build_dataset() → features + labels per bar                    │
-│  ├─ walk_forward_validate() over 4 expanding folds                 │
+│  ├─ build_dataset() → features + labels per bar (skips first 60)   │
+│  ├─ walk_forward_validate() over expanding folds                   │
+│  │    → auto-reduces fold count if data is short                   │
 │  │    → rejects model if edge doesn't survive regimes              │
 │  └─ CalibratedPredictor::train_calibrated() (if validation passes) │
 └────────────────────────────────┬───────────────────────────────────┘
                                  │
                                  ▼
 ┌────────────────────────────────────────────────────────────────────┐
-│  Phase 3 — backtest / live loop                                    │
+│  Phase 3 — backtest / forecast / TUI / web                         │
 │  SessionState::step() over bars again, now with predictor attached │
-│  → produces Trades + equity curve                                  │
+│  → produces Trades + equity curve + final P(up)                    │
 └────────────────────────────────┬───────────────────────────────────┘
                                  │
               ┌──────────────────┼──────────────────┐
               ▼                  ▼                  ▼
         ┌──────────┐      ┌──────────┐      ┌──────────────┐
-        │   TUI    │      │   Web    │      │   Report     │
-        │ ratatui  │      │ axum+ws  │      │ stats::      │
-        │          │      │          │      │ analyze()    │
+        │   TUI    │      │   Web    │      │   Forecast   │
+        │ ratatui  │      │ axum+ws  │      │ P(up) + CI   │
         └──────────┘      └──────────┘      └──────────────┘
 ```
 
@@ -68,18 +86,15 @@ let label    = make_label(&bars, t, horizon, mult, atr[t]);  // reads t+horizon
 
 // forbidden
 let features = extract_features(&bars[t], &eval[t], &recent_including_t_plus_1);
-let label    = (bars[t + horizon].close > bars[t].close) as bool;
-// ^ correct only because horizon >= 1; but if you write features that read
-//   bars[t+k] for k>0, you have leaked the future.
 ```
 
 **Why it matters:** backtest results will look great and live results
 will look catastrophic. The whole point of `walk_forward_validate` is to
 catch overfitting; lookahead defeats it silently.
 
-**If accuracy exceeds 65% on 1-minute gold, suspect a bug before
-celebrating.** There is no known feature set on this timeframe with that
-much directional edge.
+**If accuracy exceeds 65% on daily gold, suspect a bug before
+celebrating.** The current model on 10 years of daily xaus data scores
+AUC 0.474 — that's the honest number.
 
 ### Invariant 2 — Next-bar-open fills
 
@@ -111,16 +126,16 @@ let entry = match side {
 };
 ```
 
-Modeled costs are a **floor**, not a realistic estimate. If you see a
-backtest where every trade profits, the first thing to check is whether
-costs were somehow skipped in a code path.
+**xaus.com returns mid-price, not bid/ask.** The spread in `Config` is a
+modeled constant, not observed. This means modeled costs are optimistic
+in absolute terms. Treat them as a floor: real fills will be worse.
 
 ---
 
 ## 3. The state machine — `SessionState::step`
 
-This is the heartbeat. Every interface (backtest, TUI, web, live) calls
-`step` once per bar. Nothing else.
+This is the heartbeat. Every interface (backtest, forecast, TUI, web)
+calls `step` once per bar. Nothing else.
 
 ```
 step(bar):
@@ -173,7 +188,7 @@ pub struct Eval {
     pub adx:          Option<f64>,
     pub rsi:          Option<f64>,
     pub trend_up:     bool,
-    pub trend_ready:  bool,    // 5-min EMA(200) has enough bars
+    pub trend_ready:  bool,    // 5-bar EMA(200) has enough bars
     pub squeeze_ok:   bool,    // we just left a BB-inside-KC state
     pub flow:         Option<FlowState>,
     pub signals:      Vec<Signal>,
@@ -218,15 +233,17 @@ warm up indicators over all bars
     │
     ▼
 build_dataset(bars, evals, cfg)
+    ├─ requires recent.len() >= 60 (else features are degenerate)
     ├─ extract_features(bar_t, eval_t, recent) → [f64; 15]
-    ├─ make_label(bars, t, horizon, mult, atr_t)  → Option<bool>
+    ├─ make_label(bars, t, horizon, mult, atr_t) → Option<bool>
     └─ returns (Vec<Option<features>>, Vec<Option<label>>, Vec<atr>)
     │
     ▼
-walk_forward_validate(bars, evals, cfg, 4 folds)
-    ├─ 4 expanding folds: train [0..k], test [k..k+1]
+walk_forward_validate(bars, evals, cfg, requested_folds=4)
+    ├─ auto-reduces fold count if n / (n_folds+1) < min_train_bars
+    ├─ expanding window: fold k trains [0..fold_size*k],
+    │                     tests [fold_size*k..fold_size*(k+1)]
     ├─ per-fold AUC, per-regime breakdown
-    ├─ aggregate AUC, worst fold AUC, stddev AUC
     └─ WalkForwardResult { folds, aggregate_auc, ..., regime_summary }
     │
     ▼
@@ -242,6 +259,7 @@ CalibratedPredictor::train_calibrated(bars, evals, cfg)
     ├─ fit logistic regression on train
     ├─ fit Platt scaling (a, b) on calibrate → probabilities are real
     ├─ evaluate on test → AUC, Brier, log-loss, bootstrap CI
+    ├─ print top 5 features by |weight|
     └─ returns CalibratedPredictor or bails
     │
     ▼
@@ -249,17 +267,45 @@ StrategyEngine::with_predictor(cfg, model)
     └─ on_bar adds Prediction signals when P(up) crosses threshold
 ```
 
-**The predictor's diagnostic output** (AUC, Brier, CI) is printed to stdout
-during training. **Read it.** A predictor with AUC 0.52 is barely
-distinguishable from random and will hurt more than help once costs are
-included.
+**The predictor's diagnostic output** (AUC, Brier, CI, top features) is
+printed to stdout during training. **Read it.** A predictor with AUC 0.52
+is barely distinguishable from random and will hurt more than help once
+costs are included.
+
+### Baseline result
+
+On 10 years of xaus daily bars with the default 5-day horizon, the
+predictor produces:
+
+```
+Walk-forward:  UNVALIDATED (aggregate AUC 0.481, worst fold 0.457)
+Holdout:       AUC 0.474 (95% CI 0.431–0.515)
+Brier:         0.2522 (poor)
+```
+
+This is the honest baseline. The model has no demonstrated edge at 5-day
+horizons with 15 technical features. See `docs/VALIDATION.md` for what
+this means and what to try next.
 
 ---
 
-## 6. The three interfaces
+## 6. The four interfaces
 
-All three interfaces drive the **same `SessionState`** with the same
-`step(bar)` call. There is no separate logic for TUI, web, or backtest.
+All interfaces drive the **same `SessionState`** with the same
+`step(bar)` call. There is no separate logic for any of them.
+
+### Forecast — one-shot
+
+```rust
+let bars = fetch_bars(...)?;              // cached on repeat
+let evals = warm_up(&bars, &cfg);         // run step() over all bars
+let trained = try_train(&bars, &evals);   // walk-forward + calibrate
+let p_up = predict_last_bar(&bars, trained);
+println!("P(up) = {:.1}%", p_up * 100.0);
+```
+
+The forecast is `SessionState::step` run to completion, with the final
+`Eval.prediction` printed. Nothing more.
 
 ### Backtest — headless
 
@@ -274,7 +320,7 @@ print_report(&state);
 ```rust
 loop {
     if !paused { advance(n_bars_this_frame); }
-    terminal.draw(|f| app.draw(f));   // reads state.last_eval, state.pos, ...
+    terminal.draw(|f| app.draw(f));
     if key_pressed { mutate paused/speed/reset }
 }
 ```
@@ -286,7 +332,7 @@ backtest is that the loop yields to the terminal between batches.
 
 ```rust
 loop {
-    tick.tick().await;                                    // 33 ms
+    tick.tick().await;                          // 33 ms
     if !paused && !completed {
         for _ in 0..steps {
             state.step(&bars[idx]);
@@ -294,7 +340,7 @@ loop {
             eq_hist.push(state.equity);
         }
     }
-    let snapshot = build_snapshot(&state, &bars, idx, &eq_hist, ...);
+    let snapshot = build_snapshot(...);
     state_tx.send(Some(Arc::new(snapshot)));
 }
 ```
@@ -303,24 +349,10 @@ The `watch::channel` broadcasts the latest snapshot; each connected
 WebSocket client gets it and forwards to the browser. Commands (pause,
 step, reset) flow the other way through an `mpsc::channel`.
 
-### Live — REST polling
+### Live — not implemented
 
-```rust
-loop {
-    tick.tick().await;                                    // 2 s
-    let (bid, offer) = broker.snapshot().await?;
-    let mid = (bid + offer) / 2.0;
-    // aggregate ticks into a 1-minute Bar in-memory
-    // when the minute rolls over, call state.step(&completed_bar)
-    // if state.pending_signal fires, call broker.place_market_order()
-}
-```
-
-The live loop bypasses the historical bars entirely. It builds bars from
-snapshots and feeds them to the same `SessionState::step()`. This means
-**the live code path and the backtest code path share the same strategy
-logic** — a critical property. If you find a bug in one, it's a bug in
-both, and it will be caught by the backtest first.
+`aurifer live` returns an error. xaus.com is a data source, not a broker.
+See `docs/LIVE_TRADING.md` for the integration path when you're ready.
 
 ---
 
@@ -345,23 +377,47 @@ both, and it will be caught by the backtest first.
 ### Adding a new data source
 
 **Touches:**
-- `src/data.rs` — add a `fetch_X_bars()` function
-- `src/main.rs` — add a branch in the loading logic
-- `src/broker.rs` — if the source also provides execution, add a client
+- `src/broker.rs` — add a `fetch_X_bars()` function or a new broker type
+- `src/data.rs` — expose it through the `fetch_bars` dispatcher
+- `src/main.rs` — select the source via CLI flag or env var
 
 **What breaks if you get it wrong:**
 - Bars out of order → indicators silently misbehave
-- Weekend/holiday gaps handled differently from `IgBroker` → time-based
-  stops behave differently between backtest and live
+- Weekend/holiday gaps handled differently from xaus → time-based stops
+  behave differently between backtest and live
 - Volume units differ → order-flow proxy (`FlowState`) produces different
   signals
+- Missing `data_state` equivalent → silent fallback to fake or stale data
 
 **Required:**
 - Match the `Bar` schema exactly. If the source has no volume, use `1.0`
-  and document that the order-flow family will be disabled.
+  and document that the order-flow family is degraded.
 - Sort bars by `ts` before returning.
-- Add a `docs/DATA.md` entry describing the source, its coverage, its rate
-  limits, and any known gotchas.
+- Expose a freshness signal (equivalent to xaus's `data_state`) so the
+  caller can refuse stale or unavailable data.
+- Add a `docs/DATA.md` entry describing the source, its coverage, its
+  rate limits, and any known gotchas.
+
+### Adding live execution
+
+**Touches:**
+- `src/broker.rs` — add a broker client (IG v2, Interactive Brokers, OANDA v20)
+- `src/main.rs` — wire the `Live` arm to the new client
+- `src/costs.rs` — reduce modeled spread; real fills may still differ
+
+**What breaks if you get it wrong:**
+- `SessionState.pos` updated before broker confirms → a rejected order
+  leaves local state set, blocking future entries until the time stop fires
+- Partial fills not handled → position size drifts from `units` computed
+  by the sizing logic
+- Orphan positions (opened by hand, tracked by broker, unknown to
+  `SessionState`) → sizing math is wrong on the next entry
+
+**Required:**
+- Local state must **lag** the broker until confirmation.
+- No live trading until the predictor validates on the target regime and
+  demo results have tracked the backtest for at least 3 months.
+- See `docs/LIVE_TRADING.md` for the pre-flight checklist.
 
 ### Adding a new predictor
 
@@ -385,38 +441,6 @@ both, and it will be caught by the backtest first.
 - A bootstrap confidence interval on the AUC. If the 95% CI crosses 0.50,
   the model is disabled regardless of point estimate.
 
-### Adding a new metric
-
-**Touches:**
-- `src/stats.rs` — add the computation
-- `src/main.rs::print_report` — add the display line
-- `src/web.rs::Snapshot` — if it should appear in the dashboard
-
-**What breaks if you get it wrong:**
-- A metric with no confidence interval is not a metric — it's a number.
-  Every reported quantity in this project should have an uncertainty
-  estimate. If you cannot produce one, either derive it (bootstrap,
-  analytic) or do not print it.
-
-### Adding a live-order confirmation path
-
-The current `create_order` returns a **deal reference** — IG confirms
-asynchronously. Adding confirmation means:
-
-**Touches:**
-- `src/broker.rs` — add `get_order_confirmation(deal_ref) → DealConfirmation`
-- `src/main.rs::run_live_trading` — poll confirmation before updating local state
-
-**What breaks if you get it wrong:**
-- Updating `SessionState.pos` before IG confirms → a rejected order leaves
-  `state.pos` set, blocking all future entries until the time stop fires
-- Not handling partial fills → position size drifts from `units` computed
-  by the sizing logic
-
-**Required:**
-- The live loop's local state must **lag** the broker until confirmation.
-  Optimistic local state is how bots end up with orphaned positions.
-
 ---
 
 ## 8. What breaks if you touch this — a summary
@@ -429,6 +453,8 @@ asynchronously. Adding confirmation means:
 | `CalibratedPredictor::predict_proba` | `walk_forward_validate`, the diagnostic in `point_predictor.rs` |
 | `costs::entry_costs` / `costs::exit_costs` | Every test that asserts PnL — because all PnL shifts |
 | `Config` defaults | `README.md` — the tables must match `impl Default` |
+| `XausBroker::fetch_bars` | Cache key format, `data_state` handling, rate limit assumptions |
+| `resolution_to_interval` | `docs/ARCHITECTURE.md` §6 table, `apply_resolution_defaults` in `main.rs` |
 
 The rule: **anything on the left is load-bearing for something on the
 right.** If you change one and forget the other, the build may still pass

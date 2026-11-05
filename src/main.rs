@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::Parser;
 use regex::Regex;
-use serde::Deserialize;
 
 mod broker;
 mod cli;
@@ -34,11 +33,8 @@ struct TrainingResult {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 1. Load persisted credentials FIRST so they win over `.env`,
-    //    but never override an explicitly-set shell variable.
-    config_store::apply_to_env();
-    // 2. Then fill any remaining gaps from `.env`.
     dotenvy::dotenv().ok();
+    config_store::apply_to_env();
 
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
@@ -46,7 +42,6 @@ async fn main() -> Result<()> {
 
     let args = Cli::parse();
 
-    // 3. Handle `aurifer config ...` before any IG/network work.
     if let Some(Command::Config { sub }) = args.command.as_ref() {
         return handle_config_command(sub);
     }
@@ -81,7 +76,10 @@ async fn main() -> Result<()> {
         }
         Command::Backtest => {
             let bars = load_bars(ig.as_ref(), &start, &end, &args).await?;
-            let cfg = base_config(ig.is_none(), &args);
+            let mut cfg = base_config(ig.is_none(), &args);
+            let news_events = fetch_news_events_for_range(&args, start, end).await;
+            cfg.news_blackouts = events_to_blackouts(&news_events);
+            print_news_summary(&news_events, &cfg);
             let training = train_model(&bars, &cfg, &args)?;
             let trained = training.as_ref()
                 .filter(|t| t.validated)
@@ -93,7 +91,9 @@ async fn main() -> Result<()> {
         }
         Command::Gui => {
             let bars = load_bars(ig.as_ref(), &start, &end, &args).await?;
-            let cfg = base_config(ig.is_none(), &args);
+            let mut cfg = base_config(ig.is_none(), &args);
+            let news_events = fetch_news_events_for_range(&args, start, end).await;
+            cfg.news_blackouts = events_to_blackouts(&news_events);
             let warnings = build_warnings(&cfg, &args);
             let training = train_model(&bars, &cfg, &args)?;
             let trained = training.as_ref()
@@ -102,11 +102,13 @@ async fn main() -> Result<()> {
             let forecast = training.as_ref().map(|t| {
                 compute_forecast_summary(&bars, &cfg, &args, &t.model, t.validated)
             });
-            gui::run_gui(bars, cfg, warnings, trained, forecast)?;
+            gui::run_gui(bars, cfg, warnings, trained, forecast, news_events)?;
         }
         Command::Web => {
             let bars = load_bars(ig.as_ref(), &start, &end, &args).await?;
-            let cfg = base_config(ig.is_none(), &args);
+            let mut cfg = base_config(ig.is_none(), &args);
+            let news_events = fetch_news_events_for_range(&args, start, end).await;
+            cfg.news_blackouts = events_to_blackouts(&news_events);
             let warnings = build_warnings(&cfg, &args);
             let training = train_model(&bars, &cfg, &args)?;
             let trained = training.as_ref()
@@ -115,14 +117,21 @@ async fn main() -> Result<()> {
             let forecast = training.as_ref().map(|t| {
                 compute_forecast_summary(&bars, &cfg, &args, &t.model, t.validated)
             });
-            web::run_web_server(bars, cfg, warnings, trained, forecast, !args.no_open).await?;
+            web::run_web_server(
+                bars, cfg, warnings, trained, forecast, news_events, !args.no_open,
+            ).await?;
         }
         Command::Live => {
             if !args.confirm_live {
                 anyhow::bail!("Live mode requires --confirm-live. This places REAL orders.");
             }
             let b = ig.context("live mode requires IG credentials in .env")?;
-            let cfg = base_config(false, &args);
+            let mut cfg = base_config(false, &args);
+            let now = Utc::now();
+            let news_events = fetch_news_events_for_range(
+                &args, now - chrono::Duration::days(7), now,
+            ).await;
+            cfg.news_blackouts = events_to_blackouts(&news_events);
             let warm_end = Utc::now();
             let warm_start = warm_end - chrono::Duration::days(7);
             let bars = data::fetch_ig_bars(&b, "MINUTE", warm_start, warm_end).await?;
@@ -134,7 +143,9 @@ async fn main() -> Result<()> {
         }
         Command::Diagnostics { sub: DiagnosticsCommand::PointPrediction } => {
             let bars = load_bars(ig.as_ref(), &start, &end, &args).await?;
-            let cfg = base_config(ig.is_none(), &args);
+            let mut cfg = base_config(ig.is_none(), &args);
+            let news_events = fetch_news_events_for_range(&args, start, end).await;
+            cfg.news_blackouts = events_to_blackouts(&news_events);
             let mut pcfg = point_predictor::PointPredictorConfig::default();
             pcfg.horizon = args.horizon;
             run_point_prediction_diagnostic(&bars, &cfg, pcfg).await?;
@@ -144,7 +155,56 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// ── config subcommand implementation ─────────────────────────────
+// ── news fetching / conversion ─────────────────────────────────────
+
+async fn fetch_news_events_for_range(
+    args: &Cli,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Vec<NewsEvent> {
+    if args.no_news {
+        return Vec::new();
+    }
+    match fetch_news_events(start, end).await {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("  ⚠️  news fetch failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+fn events_to_blackouts(events: &[NewsEvent]) -> Vec<(i64, i64)> {
+    let mut w: Vec<(i64, i64)> = events.iter().map(|e| e.blackout()).collect();
+    w.sort_by_key(|(s, _)| *s);
+    w.dedup();
+    w
+}
+
+fn print_news_summary(events: &[NewsEvent], cfg: &Config) {
+    println!("\n── News ──");
+    if events.is_empty() {
+        println!("  no news events in range");
+        return;
+    }
+    let fomc = events.iter()
+        .filter(|e| matches!(e.kind, NewsKind::Fomc))
+        .count();
+    let news = events.len() - fomc;
+    println!("  {} FOMC, {} headlines", fomc, news);
+    println!("  {} blackout windows", cfg.news_blackouts.len());
+    for e in events.iter().take(5) {
+        let when = chrono::DateTime::from_timestamp(e.ts, 0)
+            .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        println!("    {} [{}] {}", when, e.kind.as_str(), e.title);
+    }
+    if events.len() > 5 {
+        println!("    … and {} more", events.len() - 5);
+    }
+}
+
+// ── config subcommand ─────────────────────────────────────────────
 
 fn handle_config_command(sub: &ConfigCommand) -> Result<()> {
     match sub {
@@ -160,12 +220,10 @@ fn handle_config_command(sub: &ConfigCommand) -> Result<()> {
             println!("✅ Saved {key} → {}", path.display());
             println!("   Future runs will use it automatically.");
         }
-        ConfigCommand::Get { key } => {
-            match config_store::get(key)? {
-                Some(v) => println!("{v}"),
-                None => anyhow::bail!("{key} is not set"),
-            }
-        }
+        ConfigCommand::Get { key } => match config_store::get(key)? {
+            Some(v) => println!("{v}"),
+            None => anyhow::bail!("{key} is not set"),
+        },
         ConfigCommand::List { show_secrets } => {
             let cfg = config_store::load()?;
             if cfg.values.is_empty() {
@@ -198,9 +256,7 @@ fn handle_config_command(sub: &ConfigCommand) -> Result<()> {
                 println!("{key} was not set");
             }
         }
-        ConfigCommand::Path => {
-            println!("{}", config_store::config_path().display());
-        }
+        ConfigCommand::Path => println!("{}", config_store::config_path().display()),
     }
     Ok(())
 }
@@ -210,8 +266,6 @@ fn read_value_from_stdin(key: &str) -> Result<String> {
     use std::io::{BufRead, Read, Write};
 
     if std::io::stdin().is_terminal() {
-        // Interactive: prompt and read one line. (Echo is visible — for
-        // secrets prefer piping: `echo "$KEY" | aurifer config set IG_API_KEY`)
         eprint!("Enter value for {key}: ");
         std::io::stderr().flush().ok();
         let mut line = String::new();
@@ -221,7 +275,6 @@ fn read_value_from_stdin(key: &str) -> Result<String> {
             .context("reading value from stdin")?;
         Ok(line.trim_end_matches(['\r', '\n']).to_string())
     } else {
-        // Piped / redirected: read the whole of stdin.
         let mut buf = String::new();
         std::io::stdin()
             .read_to_string(&mut buf)
@@ -230,7 +283,7 @@ fn read_value_from_stdin(key: &str) -> Result<String> {
     }
 }
 
-// ── the rest of main.rs is unchanged from the original ───────────
+// ── training / report ─────────────────────────────────────────────
 
 fn train_model(bars: &[Bar], cfg: &Config, args: &Cli) -> Result<Option<TrainingResult>> {
     if args.no_predictor {
@@ -389,7 +442,9 @@ async fn run_forecast(
         eprintln!();
     }
 
-    let cfg = Config::default();
+    let mut cfg = Config::default();
+    let news_events = fetch_news_events_for_range(args, start, end).await;
+    cfg.news_blackouts = events_to_blackouts(&news_events);
     let training = train_model(&bars, &cfg, args)?;
     let t = training.context("predictor disabled or training failed")?;
     let f = compute_forecast_summary(&bars, &cfg, args, &t.model, t.validated);
@@ -490,9 +545,6 @@ fn build_warnings(_cfg: &Config, args: &Cli) -> Vec<String> {
              backtest validates the strategy idea, not the live execution.",
             args.resolution
         ));
-    }
-    if !args.no_news && std::env::var("FXMACRODATA_API_KEY").is_err() {
-        warnings.push("FXMACRODATA_API_KEY unset — USD calendar still works (keyless)".into());
     }
     warnings
 }
@@ -688,21 +740,40 @@ async fn run_live_trading(
     }
 }
 
-const FXMD_BASE: &str = "https://api.fxmacrodata.com/v1";
+// ── news sources ───────────────────────────────────────────────────
+
 const FED_FOMC_CALENDAR: &str =
     "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm";
 
-async fn fetch_news_blackouts(
+const GOLD_RSS_FEEDS: &[(&str, &str)] = &[
+    (
+        "Google News (gold)",
+        "https://news.google.com/rss/search?q=gold+price+OR+XAUUSD+OR+%22gold+futures%22&hl=en-US&gl=US&ceid=US:en",
+    ),
+    (
+        "Yahoo Finance (GC=F)",
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=GC%3DF&region=US&lang=en-US",
+    ),
+];
+
+async fn fetch_news_events(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-) -> Result<Vec<(i64, i64)>> {
-    let mut windows: Vec<(i64, i64)> = Vec::new();
+) -> Result<Vec<NewsEvent>> {
+    let mut events: Vec<NewsEvent> = Vec::new();
 
     let fomc = fomc_dates().await;
     let mut fomc_added = 0;
     for ts in &fomc {
         if *ts >= start.timestamp() && *ts <= end.timestamp() {
-            windows.push((ts - 15 * 60, ts + 15 * 60));
+            let when = chrono::DateTime::from_timestamp(*ts, 0)
+                .map(|d| d.format("%b %d, %Y").to_string())
+                .unwrap_or_default();
+            events.push(NewsEvent {
+                ts: *ts,
+                kind: NewsKind::Fomc,
+                title: format!("FOMC meeting — {}", when),
+            });
             fomc_added += 1;
         }
     }
@@ -710,52 +781,159 @@ async fn fetch_news_blackouts(
         println!("  FOMC: {} meetings in range", fomc_added);
     }
 
-    let today = Utc::now();
-    let window_lo = today - chrono::Duration::days(85);
-    let window_hi = today + chrono::Duration::days(30);
+    match fetch_gold_news().await {
+        Ok(news) => {
+            let mut added = 0;
+            for (ts, title) in news {
+                if !is_gold_relevant(&title) { continue; }
+                if ts < start.timestamp() || ts > end.timestamp() { continue; }
+                events.push(NewsEvent {
+                    ts,
+                    kind: NewsKind::News,
+                    title,
+                });
+                added += 1;
+            }
+            if added > 0 {
+                println!("  News: {} gold-related headlines", added);
+            }
+        }
+        Err(e) => eprintln!("  ⚠️  news fetch failed: {e}"),
+    }
 
-    let from = start.max(window_lo);
-    let to = end.min(window_hi);
+    events.sort_by_key(|e| e.ts);
+    events.dedup_by(|a, b| a.ts == b.ts && a.title == b.title);
+    Ok(events)
+}
 
-    if from < to {
-        match fetch_fxmacrodata_calendar(from, to).await {
-            Ok(events) => {
-                let mut fxmd_added = 0;
-                for (ts, indicator) in &events {
-                    if !is_gold_relevant(indicator) { continue; }
-                    windows.push((ts - 15 * 60, ts + 15 * 60));
-                    fxmd_added += 1;
+async fn fetch_gold_news() -> Result<Vec<(i64, String)>> {
+    let mut all: Vec<(i64, String)> = Vec::new();
+    let mut any_ok = false;
+    let mut last_err = String::new();
+
+    for (name, url) in GOLD_RSS_FEEDS {
+        match fetch_rss_items(url).await {
+            Ok(items) => {
+                any_ok = true;
+                if !items.is_empty() {
+                    println!("  {}: {} headlines", name, items.len());
                 }
-                if fxmd_added > 0 {
-                    println!("  FXMacroData: {} high-impact USD events", fxmd_added);
-                }
+                all.extend(items);
             }
             Err(e) => {
-                eprintln!("  ⚠️  FXMacroData fetch failed: {e}");
+                eprintln!("  ⚠️  {} failed: {}", name, e);
+                last_err = e.to_string();
             }
         }
     }
 
-    windows.sort_by_key(|(s, _)| *s);
-    windows.dedup();
-    Ok(windows)
+    if !any_ok && !last_err.is_empty() {
+        anyhow::bail!("all RSS feeds failed (last: {})", last_err);
+    }
+    all.sort_by_key(|(ts, _)| *ts);
+    all.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    Ok(all)
+}
+
+async fn fetch_rss_items(url: &str) -> Result<Vec<(i64, String)>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("Mozilla/5.0 (compatible; Aurifer/0.1)")
+        .build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {}", resp.status());
+    }
+    let text = resp.text().await?;
+
+    let item_re  = Regex::new(r"(?s)<item>(.*?)</item>")?;
+    let title_re = Regex::new(r"(?s)<title>(.*?)</title>")?;
+    let date_re  = Regex::new(r"(?s)<pubDate>(.*?)</pubDate>")?;
+
+    let mut out = Vec::new();
+    for cap in item_re.captures_iter(&text) {
+        let block = &cap[1];
+        let title = title_re
+            .captures(block)
+            .map(|c| decode_xml(strip_cdata(&c[1])))
+            .unwrap_or_default();
+        if title.is_empty() { continue; }
+        let title = truncate_title(&title, 140);
+        let date_str = date_re
+            .captures(block)
+            .map(|c| strip_cdata(&c[1]).to_string())
+            .unwrap_or_default();
+        if let Some(ts) = parse_rss_date(&date_str) {
+            out.push((ts, title));
+        }
+    }
+    Ok(out)
+}
+
+fn strip_cdata(s: &str) -> &str {
+    let s = s.trim();
+    let s = s.strip_prefix("<![CDATA[").unwrap_or(s);
+    let s = s.strip_suffix("]]>").unwrap_or(s);
+    s.trim()
+}
+
+fn parse_rss_date(s: &str) -> Option<i64> {
+    if let Ok(dt) = DateTime::parse_from_rfc2822(s) {
+        return Some(dt.timestamp());
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    for fmt in &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%a, %d %b %Y %H:%M:%S",
+    ] {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(ndt.and_utc().timestamp());
+        }
+    }
+    None
+}
+
+fn decode_xml(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
+}
+
+fn truncate_title(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max { return s.to_string(); }
+    let mut out: String = s.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
 }
 
 async fn fomc_dates() -> Vec<i64> {
+    let mut all: Vec<i64> = fallback_fomc_dates();
+
     match scrape_fomc_dates().await {
         Ok(dates) if !dates.is_empty() => {
-            println!("  Fed calendar: {} FOMC meetings", dates.len());
-            dates
+            println!(
+                "  Fed calendar: {} scraped + {} fallback dates",
+                dates.len(),
+                all.len()
+            );
+            all.extend(dates);
         }
-        Ok(_) => {
-            eprintln!("  ⚠️  Fed calendar returned 0 dates — using fallback");
-            fallback_fomc_dates()
-        }
-        Err(e) => {
-            eprintln!("  ⚠️  Fed calendar fetch failed: {e} — using fallback");
-            fallback_fomc_dates()
-        }
+        Ok(_) => eprintln!("  ⚠️  Fed calendar returned 0 dates — using fallback only"),
+        Err(e) => eprintln!("  ⚠️  Fed calendar fetch failed: {e} — using fallback"),
     }
+
+    all.sort();
+    all.dedup();
+    all
 }
 
 async fn scrape_fomc_dates() -> Result<Vec<i64>> {
@@ -766,21 +944,13 @@ async fn scrape_fomc_dates() -> Result<Vec<i64>> {
 
     let html = client.get(FED_FOMC_CALENDAR).send().await?.text().await?;
 
-    let re = Regex::new(
-        r#"(?x)
-        (?P<month>[A-Z][a-z]+)\s+
-        \d{1,2}-\d{1,2}\*?\s+
-        Minutes:\s*
-        \[PDF\]\([^)]*?fomcminutes
-        (?P<year>\d{4})(?P<mm>\d{2})(?P<dd>\d{2})\.pdf
-        "#,
-    )?;
+    let re = Regex::new(r"fomcminutes(\d{4})(\d{2})(\d{2})\.(?:pdf|htm)")?;
 
     let mut out: Vec<i64> = Vec::new();
     for cap in re.captures_iter(&html) {
-        let year: i32 = cap["year"].parse().unwrap_or(0);
-        let month: u32 = cap["mm"].parse().unwrap_or(0);
-        let day: u32 = cap["dd"].parse().unwrap_or(0);
+        let year: i32 = cap[1].parse().unwrap_or(0);
+        let month: u32 = cap[2].parse().unwrap_or(0);
+        let day: u32 = cap[3].parse().unwrap_or(0);
         if year == 0 || month == 0 || day == 0 { continue; }
 
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
@@ -812,6 +982,18 @@ fn fallback_fomc_dates() -> Vec<i64> {
         (2020, 1, 29), (2020, 3, 3), (2020, 3, 15), (2020, 4, 29),
         (2020, 6, 10), (2020, 7, 29), (2020, 9, 16), (2020, 11, 5),
         (2020, 12, 16),
+        (2021, 1, 27), (2021, 3, 17), (2021, 4, 28), (2021, 6, 16),
+        (2021, 7, 28), (2021, 9, 22), (2021, 11, 3), (2021, 12, 15),
+        (2022, 1, 26), (2022, 3, 16), (2022, 5, 4), (2022, 6, 15),
+        (2022, 7, 27), (2022, 9, 21), (2022, 11, 2), (2022, 12, 14),
+        (2023, 2, 1), (2023, 3, 22), (2023, 5, 3), (2023, 6, 14),
+        (2023, 7, 26), (2023, 9, 20), (2023, 11, 1), (2023, 12, 13),
+        (2024, 1, 31), (2024, 3, 20), (2024, 5, 1), (2024, 6, 12),
+        (2024, 7, 31), (2024, 9, 18), (2024, 11, 7), (2024, 12, 18),
+        (2025, 1, 29), (2025, 3, 19), (2025, 5, 7), (2025, 6, 18),
+        (2025, 7, 30), (2025, 9, 17), (2025, 10, 29), (2025, 12, 10),
+        (2026, 1, 28), (2026, 3, 18), (2026, 4, 29), (2026, 6, 17),
+        (2026, 7, 29), (2026, 9, 16), (2026, 11, 4), (2026, 12, 16),
     ];
 
     dates.iter().filter_map(|(y, m, d)| {
@@ -821,75 +1003,8 @@ fn fallback_fomc_dates() -> Vec<i64> {
     }).collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct FxmdCalendarResponse {
-    #[serde(default)]
-    data: Vec<FxmdCalendarRow>,
-}
-
-#[derive(Debug, Deserialize)]
-struct FxmdCalendarRow {
-    #[serde(alias = "indicator", default)]
-    release: Option<String>,
-    #[serde(default)]
-    announcement_datetime: Option<i64>,
-    #[serde(default)]
-    announcement_datetime_utc: Option<String>,
-}
-
-async fn fetch_fxmacrodata_calendar(
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-) -> Result<Vec<(i64, String)>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (compatible; Aurifer/0.1)")
-        .build()?;
-
-    let from_str = start.format("%Y-%m-%d").to_string();
-    let to_str = end.format("%Y-%m-%d").to_string();
-
-    let url = format!("{FXMD_BASE}/calendar/usd?from={from_str}&to={to_str}");
-
-    let mut req = client.get(&url);
-    if let Ok(key) = std::env::var("FXMACRODATA_API_KEY") {
-        req = req.header("X-API-Key", key);
-    }
-
-    let resp = req.send().await?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        anyhow::bail!("FXMacroData returned 401 — set FXMACRODATA_API_KEY\n\
-                       (persist it with: aurifer config set FXMACRODATA_API_KEY <key>)");
-    }
-    if !status.is_success() {
-        anyhow::bail!("FXMacroData HTTP {}", status);
-    }
-
-    let json: FxmdCalendarResponse = resp.json().await?;
-
-    let mut out = Vec::with_capacity(json.data.len());
-    for row in json.data {
-        let ts = row.announcement_datetime.unwrap_or_else(|| {
-            row.announcement_datetime_utc
-                .as_deref()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.timestamp())
-                .unwrap_or(0)
-        });
-        if ts == 0 { continue; }
-        let indicator = match row.release {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
-        };
-        out.push((ts, indicator));
-    }
-
-    Ok(out)
-}
-
-fn is_gold_relevant(indicator: &str) -> bool {
-    let s = indicator.to_lowercase();
+fn is_gold_relevant(text: &str) -> bool {
+    let s = text.to_lowercase();
     matches!(
         s.as_str(),
         "non_farm_payrolls" | "nonfarm_payrolls" | "nfp" | "inflation" | "cpi"
@@ -898,5 +1013,14 @@ fn is_gold_relevant(indicator: &str) -> bool {
             | "retail_sales" | "unemployment" | "unemployment_rate" | "core_pce" | "pce"
             | "ism_manufacturing" | "ism_services" | "jobless_claims" | "initial_jobless_claims"
             | "average_hourly_earnings"
-    ) || s.contains("payroll") || s.contains("cpi") || s.contains("inflation") || s.contains("fomc")
+    )
+        || s.contains("gold")
+        || s.contains("xau")
+        || s.contains("bullion")
+        || s.contains("payroll")
+        || s.contains("cpi")
+        || s.contains("inflation")
+        || s.contains("fomc")
+        || s.contains("fed ")
+        || s.contains("federal reserve")
 }

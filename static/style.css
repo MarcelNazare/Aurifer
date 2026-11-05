@@ -86,6 +86,18 @@ header h1 {
   font-weight: 600;
 }
 
+/* ── Settings link (dashboard header) ───────────────────────── */
+.settings-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.75rem;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.settings-link:hover { color: var(--cyan); border-color: var(--cyan); }
+
 /* ── Warnings ───────────────────────────────────────────────── */
 .warnings {
   margin-bottom: 0.75rem;
@@ -318,7 +330,7 @@ main {
 
 /* ── Settings page ──────────────────────────────────────────── */
 .settings-container {
-  max-width: 980px;
+  max-width: 1000px;
   margin: 0 auto;
 }
 .settings-panel {
@@ -345,6 +357,51 @@ main {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color: var(--cyan);
   font-size: 0.72rem;
+}
+
+.notice {
+  background: rgba(88, 166, 255, 0.08);
+  border-left: 3px solid var(--cyan);
+  border-radius: 4px;
+  padding: 0.7rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--fg);
+}
+.notice code {
+  background: rgba(88, 166, 255, 0.15);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  color: var(--cyan);
+}
+
+.btn-primary {
+  display: inline-block;
+  background: var(--cyan);
+  color: #0d1117 !important;
+  border: none;
+  border-radius: 4px;
+  padding: 0.5rem 1rem;
+  font-weight: 700;
+  font-size: 0.8rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.btn-primary:hover { filter: brightness(1.1); }
+
+.settings-footer {
+  margin-top: 1rem;
+  text-align: right;
+}
+
+.loading {
+  padding: 1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-style: italic;
 }
 
 #cred-table {
@@ -383,9 +440,10 @@ main {
   color: var(--dim);
   font-style: italic;
 }
-#cred-table td.val .set {
-  color: var(--green);
-}
+#cred-table td.val .set { color: var(--green); }
+#cred-table td.src { font-size: 0.72rem; }
+#cred-table td.src .src-env   { color: var(--yellow); font-weight: 600; }
+#cred-table td.src .src-saved { color: var(--green); }
 #cred-table td.actions { white-space: nowrap; text-align: right; }
 #cred-table button {
   background: var(--bg);
@@ -464,17 +522,6 @@ main {
   border-left: 2px solid var(--red);
 }
 
-.settings-link {
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 0.75rem;
-  padding: 0.35rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
-}
-.settings-link:hover { color: var(--cyan); border-color: var(--cyan); }
-
 /* ── Responsive ─────────────────────────────────────────────── */
 @media (max-width: 1100px) {
   main { grid-template-columns: 1fr 1fr; }
@@ -488,4 +535,71 @@ main {
   header { flex-wrap: wrap; }
   .controls { margin-left: 0; width: 100%; }
   #add-form { grid-template-columns: 1fr; }
+  #cred-table td.desc { display: none; }
+  #cred-table th:nth-child(2) { display: none; }
+}
+
+/* ── News panel ─────────────────────────────────────────────── */
+.news-panel { margin-bottom: 0.75rem; }
+#news-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.news-empty {
+  color: var(--dim);
+  font-style: italic;
+  font-size: 0.8rem;
+  padding: 0.5rem 0;
+}
+.news-item {
+  display: grid;
+  grid-template-columns: 3.6rem 5.2rem 5rem 1fr;
+  gap: 0.6rem;
+  align-items: baseline;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  border-left: 2px solid transparent;
+}
+.news-item.news-active {
+  background: rgba(248, 81, 73, 0.10);
+  border-left-color: var(--red);
+  font-weight: 500;
+}
+.news-item.news-upcoming { color: var(--fg); }
+.news-item.news-past     { color: var(--muted); }
+
+.news-tag {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  text-align: center;
+}
+.news-tag.fomc     { color: #d29922; background: rgba(210, 153, 34, 0.15); }
+.news-tag.headline { color: var(--cyan); background: rgba(88, 166, 255, 0.15); }
+
+.news-time {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.news-rel {
+  font-size: 0.7rem;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.news-active .news-time,
+.news-active .news-rel { color: var(--red); }
+
+.news-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

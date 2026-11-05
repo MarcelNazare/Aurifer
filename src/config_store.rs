@@ -10,8 +10,8 @@
 //!
 //! Resolution order (highest priority first):
 //!   1. Variables the user set explicitly in the shell
-//!   2. Values saved via `aurifer config set` / the web settings page
-//!   3. Variables loaded from `.env`
+//!   2. Variables loaded from `.env`
+//!   3. Values saved via `aurifer config set` / the web settings page
 //!   4. Hard-coded defaults in the code
 
 use anyhow::{Context, Result};
@@ -30,7 +30,6 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("IG_ORDER_SIZE",               "Order size per trade (default: 1.0)"),
     ("IG_CACHE_DIR",                "Where to cache IG historical bars (default: ./cache)"),
     ("IG_WEEKLY_DATA_POINT_BUDGET", "Weekly data points budget (default: 10000)"),
-    ("FXMACRODATA_API_KEY",         "FXMacroData API key for USD economic calendar"),
     ("AURIFER_CACHE_DIR",           "Where to cache CSV data (default: ./cache)"),
     ("AURIFER_CSV",                 "Path to a manual CSV file to use instead of downloading"),
 ];
@@ -41,7 +40,6 @@ pub struct StoredConfig {
     pub values: BTreeMap<String, String>,
 }
 
-/// One row for display in the settings UI / API.
 #[derive(Debug, Clone, Serialize)]
 pub struct CredentialRow {
     pub key: String,
@@ -49,10 +47,11 @@ pub struct CredentialRow {
     pub is_secret: bool,
     pub is_set: bool,
     pub description: Option<String>,
+    /// True if the process env already has a value for this key — used by
+    /// the web UI to show where the effective value actually comes from.
+    pub from_env_or_dotenv: bool,
 }
 
-/// Where the config lives. Overridable via `AURIFER_CONFIG_DIR` for tests,
-/// containers, or portable setups (e.g. a USB stick).
 pub fn config_dir() -> PathBuf {
     if let Ok(d) = std::env::var("AURIFER_CONFIG_DIR") {
         if !d.is_empty() {
@@ -111,7 +110,6 @@ pub fn save(cfg: &StoredConfig) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Normalize keys to uppercase so `ig_api_key` and `IG_API_KEY` are the same.
 fn normalize_key(k: &str) -> String {
     k.trim().to_ascii_uppercase()
 }
@@ -120,6 +118,19 @@ pub fn set(key: &str, value: &str) -> Result<PathBuf> {
     let mut cfg = load()?;
     cfg.values.insert(normalize_key(key), value.to_string());
     save(&cfg)
+}
+
+/// Save to disk AND set the process env var. The env update takes effect
+/// for any code that reads env vars **after** this call. Already-initialized
+/// resources (e.g. an established IG connection) will not pick up the
+/// change until the app is restarted.
+#[allow(unused_unsafe)]
+pub fn set_and_apply(key: &str, value: &str) -> Result<PathBuf> {
+    let path = set(key, value)?;
+    unsafe {
+        std::env::set_var(normalize_key(key), value);
+    }
+    Ok(path)
 }
 
 pub fn get(key: &str) -> Result<Option<String>> {
@@ -158,6 +169,7 @@ pub fn list_all() -> Result<Vec<CredentialRow>> {
             is_secret: secret,
             is_set,
             description: Some(desc.to_string()),
+            from_env_or_dotenv: std::env::var_os(key).is_some(),
         });
         seen.insert(key.to_string());
     }
@@ -174,10 +186,10 @@ pub fn list_all() -> Result<Vec<CredentialRow>> {
             is_secret: secret,
             is_set: true,
             description: None,
+            from_env_or_dotenv: std::env::var_os(key).is_some(),
         });
     }
 
-    // Preserve the KNOWN_KEYS declaration order; append custom keys alphabetically.
     rows.sort_by(|a, b| {
         let a_pos = KNOWN_KEYS
             .iter()
@@ -193,11 +205,9 @@ pub fn list_all() -> Result<Vec<CredentialRow>> {
     Ok(rows)
 }
 
-/// Load stored values into the process environment.
-///
-/// Call this **before** `dotenvy::dotenv()` so that a user-saved credential
-/// takes precedence over a stale `.env` entry, while an explicitly-set shell
-/// variable still wins (we never overwrite an existing env var).
+/// Load stored values into the process environment — but only for keys
+/// not already set (by the shell or by `.env`). Call this AFTER
+/// `dotenvy::dotenv()` so that `.env` wins over saved settings.
 #[allow(unused_unsafe)]
 pub fn apply_to_env() {
     let cfg = match load() {

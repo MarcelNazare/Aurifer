@@ -62,6 +62,7 @@ struct Snapshot {
     halted: bool,
     warnings: Vec<String>,
     forecast: Option<ForecastView>,
+    news_events: Vec<NewsEventView>,
 }
 
 #[derive(Serialize, Clone)]
@@ -129,6 +130,14 @@ impl From<ForecastSummary> for ForecastView {
     }
 }
 
+#[derive(Serialize, Clone)]
+struct NewsEventView {
+    ts: i64,
+    kind: String,
+    title: String,
+    active: bool,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type")]
 enum WsCommand {
@@ -140,18 +149,20 @@ enum WsCommand {
     SetSpeed { value: f64 },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_web_server(
     bars: Vec<Bar>,
     cfg: Config,
     warnings: Vec<String>,
     predictor: Option<crate::predictor::CalibratedPredictor>,
     forecast: Option<ForecastSummary>,
+    news_events: Vec<NewsEvent>,
     open_browser: bool,
 ) -> Result<()> {
     let (state_tx, _) = watch::channel::<Option<Arc<Snapshot>>>(None);
     let (cmd_tx, cmd_rx) = mpsc::channel::<WsCommand>(32);
     tokio::spawn(sim_loop(
-        bars, cfg, warnings, state_tx.clone(), cmd_rx, predictor, forecast,
+        bars, cfg, warnings, state_tx.clone(), cmd_rx, predictor, forecast, news_events,
     ));
 
     let app = Router::new()
@@ -191,10 +202,16 @@ pub async fn run_web_server(
 // ── static asset handlers ────────────────────────────────────────
 
 async fn serve_index() -> impl IntoResponse {
-    axum::response::Html(INDEX_HTML)
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store, must-revalidate")],
+        axum::response::Html(INDEX_HTML),
+    )
 }
 async fn serve_settings() -> impl IntoResponse {
-    axum::response::Html(SETTINGS_HTML)
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store, must-revalidate")],
+        axum::response::Html(SETTINGS_HTML),
+    )
 }
 async fn serve_style() -> impl IntoResponse {
     ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS)
@@ -246,7 +263,7 @@ async fn api_set_credential(Json(req): Json<SetCredentialReq>) -> impl IntoRespo
     {
         return bad_request("key must contain only A-Z, 0-9, and _");
     }
-    match config_store::set(&req.key, &req.value) {
+    match config_store::set_and_apply(&req.key, &req.value) {
         Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => server_error(&e.to_string()),
     }
@@ -277,8 +294,9 @@ fn server_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
-// ── simulation loop / WS handler (unchanged) ────────────────────
+// ── simulation loop / WS handler ────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn sim_loop(
     bars: Vec<Bar>,
     cfg: Config,
@@ -287,12 +305,14 @@ async fn sim_loop(
     mut cmd_rx: mpsc::Receiver<WsCommand>,
     predictor: Option<crate::predictor::CalibratedPredictor>,
     forecast: Option<ForecastSummary>,
+    news_events: Vec<NewsEvent>,
 ) {
     let mut state = match predictor {
         Some(p) => SessionState::with_predictor(cfg.clone(), p),
         None => SessionState::new(cfg.clone()),
     };
     let forecast_view: Option<ForecastView> = forecast.map(|f| f.into());
+    let news_events: Arc<Vec<NewsEvent>> = Arc::new(news_events);
 
     let mut idx = 0usize;
     let mut paused = false;
@@ -331,7 +351,7 @@ async fn sim_loop(
                 }
                 let snap = build_snapshot(
                     &state, &bars, idx, &eq_hist, paused, speed, completed,
-                    &warnings, forecast_view.clone(),
+                    &warnings, forecast_view.clone(), &news_events,
                 );
                 let _ = state_tx.send(Some(Arc::new(snap)));
             }
@@ -364,6 +384,7 @@ async fn sim_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_snapshot(
     state: &SessionState,
     bars: &[Bar],
@@ -374,10 +395,15 @@ fn build_snapshot(
     completed: bool,
     warnings: &[String],
     forecast: Option<ForecastView>,
+    news: &[NewsEvent],
 ) -> Snapshot {
     let bar = bars.get(idx.saturating_sub(1)).copied();
     let price = bar.map(|b| b.close).unwrap_or(0.0);
     let ohlc = bar.map(|b| [b.open, b.high, b.low, b.close]).unwrap_or([0.0; 4]);
+    let sim_ts = bar
+        .map(|b| b.ts)
+        .or_else(|| bars.first().map(|b| b.ts))
+        .unwrap_or(0);
 
     let n = state.trades.len();
     let wins = state.trades.iter().filter(|t| t.pnl > 0.0).count();
@@ -406,10 +432,27 @@ fn build_snapshot(
         unrealized: p.unrealized(price),
     });
 
+    let lo = sim_ts - 30 * 60;
+    let hi = sim_ts + 24 * 3600;
+    let news_views: Vec<NewsEventView> = news
+        .iter()
+        .filter(|e| e.ts >= lo && e.ts <= hi)
+        .take(20)
+        .map(|e| {
+            let (b_lo, b_hi) = e.blackout();
+            NewsEventView {
+                ts: e.ts,
+                kind: e.kind.as_str().to_string(),
+                title: e.title.clone(),
+                active: b_lo <= sim_ts && sim_ts <= b_hi,
+            }
+        })
+        .collect();
+
     Snapshot {
         bar_index: idx,
         total_bars: bars.len(),
-        current_ts: bar.map(|b| b.ts).unwrap_or(0),
+        current_ts: sim_ts,
         price,
         ohlc,
         atr: state.last_eval.as_ref().and_then(|e| e.atr),
@@ -433,6 +476,7 @@ fn build_snapshot(
         halted: state.halted(),
         warnings: warnings.to_vec(),
         forecast,
+        news_events: news_views,
     }
 }
 

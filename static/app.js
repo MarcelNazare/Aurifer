@@ -179,6 +179,56 @@ function update(s) {
     $("forecast-unavailable").style.display = "";
     $("forecast-meta").textContent = "";
   }
+
+  updateNews(s);
+}
+
+// ── News panel ────────────────────────────────────────────────────
+
+function updateNews(s) {
+  const list = s.news_events || [];
+  const content = $("news-content");
+  const meta = $("news-meta");
+
+  if (!list.length) {
+    content.innerHTML = '<div class="news-empty">No news events in this window.</div>';
+    meta.textContent = "";
+    return;
+  }
+
+  const active = list.filter(e => e.active).length;
+  const upcoming = list.filter(e => !e.active && e.ts > s.current_ts).length;
+  const parts = [];
+  if (active) parts.push(`${active} active`);
+  if (upcoming) parts.push(`${upcoming} upcoming`);
+  meta.textContent = parts.length ? `(${parts.join(" · ")})` : "";
+
+  content.innerHTML = list.map(e => {
+    const when = new Date(e.ts * 1000);
+    const stamp = when.toISOString().slice(5, 16).replace("T", " ");
+    const rel = fmtRelative(s.current_ts, e.ts);
+    const cls = e.active
+      ? "news-active"
+      : e.ts > s.current_ts ? "news-upcoming" : "news-past";
+    const tag = e.kind === "FOMC" ? "fomc" : "headline";
+    return `<div class="news-item ${cls}">
+      <span class="news-tag ${tag}">${esc(e.kind)}</span>
+      <span class="news-time">${stamp}</span>
+      <span class="news-rel">${rel}</span>
+      <span class="news-title">${esc(e.title)}</span>
+    </div>`;
+  }).join("");
+}
+
+function fmtRelative(now, ts) {
+  const d = ts - now;
+  const abs = Math.abs(d);
+  let n, unit;
+  if (abs < 60)        { n = abs;                 unit = "s"; }
+  else if (abs < 3600) { n = Math.floor(abs / 60); unit = "m"; }
+  else if (abs < 86400){ n = Math.floor(abs / 3600); unit = "h"; }
+  else                 { n = Math.floor(abs / 86400); unit = "d"; }
+  return d >= 0 ? `in ${n}${unit}` : `${n}${unit} ago`;
 }
 
 function initChart() {

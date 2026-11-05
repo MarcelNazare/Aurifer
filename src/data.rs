@@ -103,10 +103,20 @@ pub async fn fetch_csv_bars(
 async fn load_csv_text(cache_path: &PathBuf) -> Result<String> {
     if let Ok(p) = std::env::var("AURIFER_CSV") {
         let path = PathBuf::from(&p);
-        if path.exists() {
+        if path.is_file() {
             println!("  📄 loading CSV from AURIFER_CSV: {}", path.display());
             return std::fs::read_to_string(&path)
                 .map_err(|e| anyhow!("could not read AURIFER_CSV {}: {}", path.display(), e));
+        } else if path.is_dir() {
+            eprintln!();
+            eprintln!("  ⚠️  AURIFER_CSV points to a DIRECTORY, not a file:");
+            eprintln!("       AURIFER_CSV = {}", path.display());
+            eprintln!("     AURIFER_CSV must be a path to a *.csv file.");
+            eprintln!("     If you meant to change the cache directory, use AURIFER_CACHE_DIR.");
+            eprintln!("     Ignoring AURIFER_CSV and falling back to download.");
+            eprintln!();
+        } else if path.exists() {
+            eprintln!("  ⚠️  AURIFER_CSV set to {} but it is not a regular file — ignoring", path.display());
         } else {
             eprintln!("  ⚠️  AURIFER_CSV set to {} but missing — downloading", path.display());
         }

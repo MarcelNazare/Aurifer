@@ -156,3 +156,38 @@ impl ForecastSummary {
             .join(", ")
     }
 }
+
+// ── News / events surfaced to the UI ────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewsKind {
+    /// Scheduled FOMC announcement — timing known well in advance.
+    Fomc,
+    /// Headline pulled from a live RSS feed (Google News, Yahoo Finance).
+    News,
+}
+
+impl NewsKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NewsKind::Fomc => "FOMC",
+            NewsKind::News => "NEWS",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewsEvent {
+    /// Announcement timestamp (UTC seconds).
+    pub ts: i64,
+    pub kind: NewsKind,
+    pub title: String,
+}
+
+impl NewsEvent {
+    /// Window that the strategy engine treats as a blackout:
+    /// 15 minutes before and after the announcement.
+    pub fn blackout(&self) -> (i64, i64) {
+        (self.ts - 15 * 60, self.ts + 15 * 60)
+    }
+}

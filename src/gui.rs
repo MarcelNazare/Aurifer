@@ -20,6 +20,7 @@ pub struct App {
     accumulated: f64,
     last_frame: Instant,
     forecast: Option<ForecastSummary>,
+    news_events: Vec<NewsEvent>,
 }
 
 impl App {
@@ -29,6 +30,7 @@ impl App {
         warnings: Vec<String>,
         predictor: Option<crate::predictor::CalibratedPredictor>,
         forecast: Option<ForecastSummary>,
+        news_events: Vec<NewsEvent>,
     ) -> Self {
         let state = match predictor {
             Some(p) => SessionState::with_predictor(cfg.clone(), p),
@@ -47,6 +49,7 @@ impl App {
             accumulated: 0.0,
             last_frame: Instant::now(),
             forecast,
+            news_events,
         }
     }
 
@@ -74,6 +77,14 @@ impl App {
                 self.paused = true;
             }
         }
+    }
+
+    fn sim_now(&self) -> i64 {
+        self.state
+            .last_bar
+            .map(|b| b.ts)
+            .or_else(|| self.bars.first().map(|b| b.ts))
+            .unwrap_or_else(|| chrono::Utc::now().timestamp())
     }
 }
 
@@ -118,6 +129,10 @@ impl eframe::App for App {
 
         if self.forecast.is_some() {
             egui::TopBottomPanel::top("forecast").show(ctx, |ui| self.draw_forecast(ui));
+        }
+
+        if !self.news_events.is_empty() {
+            egui::TopBottomPanel::top("news").show(ctx, |ui| self.draw_news(ui));
         }
 
         egui::TopBottomPanel::bottom("controls").show(ctx, |ui| self.draw_controls(ui));
@@ -232,6 +247,73 @@ impl App {
             ui.label("· top:");
             ui.colored_label(egui::Color32::GRAY, fc.features_line());
         });
+    }
+
+    fn draw_news(&self, ui: &mut egui::Ui) {
+        let now = self.sim_now();
+
+        let mut active: Vec<&NewsEvent> = Vec::new();
+        let mut upcoming: Vec<&NewsEvent> = Vec::new();
+        let mut recent: Vec<&NewsEvent> = Vec::new();
+        for e in &self.news_events {
+            let (lo, hi) = e.blackout();
+            if lo <= now && now <= hi {
+                active.push(e);
+            } else if e.ts > now {
+                upcoming.push(e);
+            } else if e.ts > now - 3600 {
+                recent.push(e);
+            }
+        }
+        upcoming.sort_by_key(|e| e.ts);
+        upcoming.truncate(4);
+        recent.sort_by_key(|e| -e.ts);
+        recent.truncate(2);
+
+        let mut header = String::from("NEWS");
+        if !active.is_empty() {
+            header.push_str(&format!("  ⏰ {} active blackout", active.len()));
+        }
+        ui.horizontal(|ui| {
+            ui.heading(header);
+            if !upcoming.is_empty() {
+                ui.label(format!("· next {} upcoming", upcoming.len()));
+            }
+        });
+
+        let draw_line = |ui: &mut egui::Ui, e: &NewsEvent, active: bool| {
+            let when = chrono::DateTime::<chrono::Utc>::from_timestamp(e.ts, 0)
+                .map(|d| d.format("%b %d %H:%M").to_string())
+                .unwrap_or_default();
+            let rel = fmt_relative(now, e.ts);
+            let color = if active {
+                egui::Color32::RED
+            } else if e.ts > now {
+                egui::Color32::LIGHT_BLUE
+            } else {
+                egui::Color32::GRAY
+            };
+            let tag_color = match e.kind {
+                NewsKind::Fomc => egui::Color32::YELLOW,
+                NewsKind::News => egui::Color32::LIGHT_GRAY,
+            };
+            ui.horizontal(|ui| {
+                ui.colored_label(tag_color, format!("[{}]", e.kind.as_str()));
+                ui.colored_label(color, format!("{:<16}", when));
+                ui.colored_label(color, format!("{:<10}", rel));
+                ui.label(&e.title);
+            });
+        };
+
+        for e in active {
+            draw_line(ui, e, true);
+        }
+        for e in recent {
+            draw_line(ui, e, false);
+        }
+        for e in upcoming {
+            draw_line(ui, e, false);
+        }
     }
 
     fn draw_controls(&self, ui: &mut egui::Ui) {
@@ -448,14 +530,34 @@ fn ui_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+fn fmt_relative(now: i64, ts: i64) -> String {
+    let d = ts - now;
+    let abs = d.abs();
+    let (n, unit) = if abs < 60 {
+        (abs, "s")
+    } else if abs < 3600 {
+        (abs / 60, "m")
+    } else if abs < 86_400 {
+        (abs / 3600, "h")
+    } else {
+        (abs / 86_400, "d")
+    };
+    if d >= 0 {
+        format!("in {}{}", n, unit)
+    } else {
+        format!("{}{} ago", n, unit)
+    }
+}
+
 pub fn run_gui(
     bars: Vec<Bar>,
     cfg: Config,
     warnings: Vec<String>,
     predictor: Option<crate::predictor::CalibratedPredictor>,
     forecast: Option<ForecastSummary>,
+    news_events: Vec<NewsEvent>,
 ) -> Result<()> {
-    let app = App::new(bars, cfg, warnings, predictor, forecast);
+    let app = App::new(bars, cfg, warnings, predictor, forecast, news_events);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 900.0])

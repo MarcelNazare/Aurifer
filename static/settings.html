@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Aurifer — Settings</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="settings-container">
+  <header>
+    <h1>AURIFER · SETTINGS</h1>
+    <div class="controls">
+      <a href="/" class="settings-link">← Back to dashboard</a>
+    </div>
+  </header>
+
+  <section class="settings-panel">
+    <h2>Saved credentials</h2>
+    <p class="hint">
+      Stored in <span class="config-path" id="config-path">…</span>.
+      Secret values are masked here — to change a value, click <b>Update</b>.
+      <b>Changes take effect the next time you launch Aurifer.</b>
+    </p>
+    <div class="flash" id="flash"></div>
+    <table id="cred-table">
+      <thead>
+        <tr><th>Key</th><th>Description</th><th>Value</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="settings-panel">
+    <h2>Add a custom credential</h2>
+    <p class="hint">
+      Any environment-variable name works here. Keys are normalized to uppercase.
+      Prefer this for secrets so they never appear in shell history.
+    </p>
+    <form id="add-form" autocomplete="off">
+      <label>Key
+        <input type="text" id="new-key" placeholder="MY_CUSTOM_KEY" required
+               pattern="[A-Za-z0-9_]+">
+      </label>
+      <label>Value
+        <input type="password" id="new-value" placeholder="…" required
+               autocomplete="new-password">
+      </label>
+      <button type="submit">Save</button>
+    </form>
+  </section>
+</div>
+<script src="/static/settings.js"></script>
+</body>
+</html>

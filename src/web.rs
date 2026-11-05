@@ -4,11 +4,11 @@ use anyhow::Result;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Path as AxumPath, State,
     },
     response::IntoResponse,
-    routing::get,
-    Router,
+    routing::{delete, get},
+    Json, Router,
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -18,12 +18,15 @@ use std::{
 };
 use tokio::sync::{mpsc, watch};
 
+use crate::config_store;
 use crate::session::SessionState;
 use crate::types::*;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
+const SETTINGS_HTML: &str = include_str!("../static/settings.html");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 const APP_JS: &str = include_str!("../static/app.js");
+const SETTINGS_JS: &str = include_str!("../static/settings.js");
 
 #[derive(Clone)]
 struct WebState {
@@ -153,15 +156,23 @@ pub async fn run_web_server(
 
     let app = Router::new()
         .route("/", get(serve_index))
+        .route("/settings", get(serve_settings))
         .route("/static/style.css", get(serve_style))
         .route("/static/app.js", get(serve_js))
+        .route("/static/settings.js", get(serve_settings_js))
         .route("/ws", get(ws_handler))
+        .route(
+            "/api/credentials",
+            get(api_list_credentials).post(api_set_credential),
+        )
+        .route("/api/credentials/{key}", delete(api_delete_credential))
         .with_state(WebState { state_tx, cmd_tx });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let url = format!("http://localhost:{port}");
     println!("Aurifer web UI: {url}");
+    println!("   Settings:    {url}/settings");
 
     if open_browser {
         let url = url.clone();
@@ -177,8 +188,13 @@ pub async fn run_web_server(
     Ok(())
 }
 
+// ── static asset handlers ────────────────────────────────────────
+
 async fn serve_index() -> impl IntoResponse {
     axum::response::Html(INDEX_HTML)
+}
+async fn serve_settings() -> impl IntoResponse {
+    axum::response::Html(SETTINGS_HTML)
 }
 async fn serve_style() -> impl IntoResponse {
     ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLE_CSS)
@@ -189,6 +205,79 @@ async fn serve_js() -> impl IntoResponse {
         APP_JS,
     )
 }
+async fn serve_settings_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        SETTINGS_JS,
+    )
+}
+
+// ── credentials API ─────────────────────────────────────────────
+
+async fn api_list_credentials() -> impl IntoResponse {
+    match config_store::list_all() {
+        Ok(credentials) => Json(serde_json::json!({
+            "ok": true,
+            "path": config_store::config_path().display().to_string(),
+            "credentials": credentials,
+        }))
+        .into_response(),
+        Err(e) => server_error(&e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct SetCredentialReq {
+    key: String,
+    value: String,
+}
+
+async fn api_set_credential(Json(req): Json<SetCredentialReq>) -> impl IntoResponse {
+    if req.key.trim().is_empty() {
+        return bad_request("key is required");
+    }
+    if req.value.is_empty() {
+        return bad_request("value is required");
+    }
+    if !req
+        .key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return bad_request("key must contain only A-Z, 0-9, and _");
+    }
+    match config_store::set(&req.key, &req.value) {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => server_error(&e.to_string()),
+    }
+}
+
+async fn api_delete_credential(AxumPath(key): AxumPath<String>) -> impl IntoResponse {
+    match config_store::unset(&key) {
+        Ok((removed, _)) => {
+            Json(serde_json::json!({ "ok": true, "removed": removed })).into_response()
+        }
+        Err(e) => server_error(&e.to_string()),
+    }
+}
+
+fn bad_request(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "ok": false, "error": msg })),
+    )
+        .into_response()
+}
+
+fn server_error(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "ok": false, "error": msg })),
+    )
+        .into_response()
+}
+
+// ── simulation loop / WS handler (unchanged) ────────────────────
 
 async fn sim_loop(
     bars: Vec<Bar>,

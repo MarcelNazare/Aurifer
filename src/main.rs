@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 mod broker;
 mod cli;
+mod config_store;
 mod costs;
 mod data;
 mod gui;
@@ -21,7 +22,7 @@ mod types;
 mod web;
 
 use broker::IgBroker;
-use cli::{Cli, Command, DiagnosticsCommand};
+use cli::{Cli, Command, ConfigCommand, DiagnosticsCommand};
 use predictor::{CalibratedPredictor, PredictorConfig};
 use session::SessionState;
 use types::*;
@@ -33,12 +34,23 @@ struct TrainingResult {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 1. Load persisted credentials FIRST so they win over `.env`,
+    //    but never override an explicitly-set shell variable.
+    config_store::apply_to_env();
+    // 2. Then fill any remaining gaps from `.env`.
     dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .init();
 
     let args = Cli::parse();
+
+    // 3. Handle `aurifer config ...` before any IG/network work.
+    if let Some(Command::Config { sub }) = args.command.as_ref() {
+        return handle_config_command(sub);
+    }
+
     let (start, end) = resolve_date_range(&args.start, &args.end)?;
 
     let ig: Option<IgBroker> = if args.no_ig {
@@ -52,6 +64,11 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("⚠️ IG connection failed: {e}");
+                eprintln!("   Persist IG credentials for future runs with:");
+                eprintln!("     aurifer config set IG_API_KEY <your-key>");
+                eprintln!("     aurifer config set IG_USERNAME <your-username>");
+                eprintln!("     aurifer config set IG_PASSWORD <your-password>");
+                eprintln!("   Or set them in `.env`. `aurifer config list` shows what's saved.");
                 eprintln!("⚠️ Falling back to synthetic data. Set IG_* in .env to use IG.");
                 None
             }
@@ -122,9 +139,98 @@ async fn main() -> Result<()> {
             pcfg.horizon = args.horizon;
             run_point_prediction_diagnostic(&bars, &cfg, pcfg).await?;
         }
+        Command::Config { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
+
+// ── config subcommand implementation ─────────────────────────────
+
+fn handle_config_command(sub: &ConfigCommand) -> Result<()> {
+    match sub {
+        ConfigCommand::Set { key, value } => {
+            let v = match value {
+                Some(v) if !v.is_empty() && v != "-" => v.clone(),
+                _ => read_value_from_stdin(key)?,
+            };
+            if v.trim().is_empty() {
+                anyhow::bail!("empty value — nothing saved");
+            }
+            let path = config_store::set(key, &v)?;
+            println!("✅ Saved {key} → {}", path.display());
+            println!("   Future runs will use it automatically.");
+        }
+        ConfigCommand::Get { key } => {
+            match config_store::get(key)? {
+                Some(v) => println!("{v}"),
+                None => anyhow::bail!("{key} is not set"),
+            }
+        }
+        ConfigCommand::List { show_secrets } => {
+            let cfg = config_store::load()?;
+            if cfg.values.is_empty() {
+                println!("(no saved configuration)");
+                println!();
+                println!("Known keys you may want to set:");
+                for (k, desc) in config_store::KNOWN_KEYS {
+                    println!("  {:<28} {}", k, desc);
+                }
+                println!();
+                println!("Path: {}", config_store::config_path().display());
+                return Ok(());
+            }
+            for (k, v) in &cfg.values {
+                let shown = if !*show_secrets && config_store::is_secret(k) {
+                    config_store::mask(v)
+                } else {
+                    v.clone()
+                };
+                println!("{k} = {shown}");
+            }
+            println!();
+            println!("Path: {}", config_store::config_path().display());
+        }
+        ConfigCommand::Unset { key } => {
+            let (removed, path) = config_store::unset(key)?;
+            if removed {
+                println!("✅ Removed {key} from {}", path.display());
+            } else {
+                println!("{key} was not set");
+            }
+        }
+        ConfigCommand::Path => {
+            println!("{}", config_store::config_path().display());
+        }
+    }
+    Ok(())
+}
+
+fn read_value_from_stdin(key: &str) -> Result<String> {
+    use std::io::IsTerminal;
+    use std::io::{BufRead, Read, Write};
+
+    if std::io::stdin().is_terminal() {
+        // Interactive: prompt and read one line. (Echo is visible — for
+        // secrets prefer piping: `echo "$KEY" | aurifer config set IG_API_KEY`)
+        eprint!("Enter value for {key}: ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("reading value from stdin")?;
+        Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    } else {
+        // Piped / redirected: read the whole of stdin.
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading value from stdin")?;
+        Ok(buf.trim().to_string())
+    }
+}
+
+// ── the rest of main.rs is unchanged from the original ───────────
 
 fn train_model(bars: &[Bar], cfg: &Config, args: &Cli) -> Result<Option<TrainingResult>> {
     if args.no_predictor {
@@ -753,7 +859,8 @@ async fn fetch_fxmacrodata_calendar(
     let resp = req.send().await?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        anyhow::bail!("FXMacroData returned 401 — set FXMACRODATA_API_KEY");
+        anyhow::bail!("FXMacroData returned 401 — set FXMACRODATA_API_KEY\n\
+                       (persist it with: aurifer config set FXMACRODATA_API_KEY <key>)");
     }
     if !status.is_success() {
         anyhow::bail!("FXMacroData HTTP {}", status);
